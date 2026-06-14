@@ -322,12 +322,17 @@ def montar_conteudo_wp(artigo_md: str, mlb_id: str) -> str:
 
 def calcular_proxima_data() -> datetime:
     """
-    Retorna a próxima data livre para agendamento.
-    Agenda 1 artigo/dia seg a dom, 09h BRT (12h UTC).
-    Consulta posts já agendados (status=future) para não colidir.
+    Retorna a próxima data livre para agendamento (1/dia, 09h BRT = 12h UTC).
+    Se ainda não passou das 08h45 BRT (detection de 08h30 chegou a tempo),
+    agenda para HOJE — senão para amanhã.
+    Consulta posts futuros no WP para não colidir com artigos já agendados.
     """
-    hoje_brt = datetime.now(BRT).date()
-    amanha   = hoje_brt + timedelta(days=1)
+    agora_brt = datetime.now(BRT)
+    hoje_brt  = agora_brt.date()
+
+    # Janela de 15 min após a detection de 08h30: se < 08h45 → agenda hoje
+    corte = agora_brt.replace(hour=8, minute=45, second=0, microsecond=0)
+    inicio = hoje_brt if agora_brt < corte else hoje_brt + timedelta(days=1)
 
     r = requests.get(
         f'{WP_URL}/wp-json/wp/v2/posts',
@@ -341,11 +346,11 @@ def calcular_proxima_data() -> datetime:
         ultima_str = posts_futuros[0].get('date', '')
         try:
             ultima  = datetime.fromisoformat(ultima_str).date()
-            proxima = max(ultima + timedelta(days=1), amanha)
+            proxima = max(ultima + timedelta(days=1), inicio)
         except ValueError:
-            proxima = amanha
+            proxima = inicio
     else:
-        proxima = amanha
+        proxima = inicio
 
     # 09h BRT = 12h UTC
     return datetime(proxima.year, proxima.month, proxima.day, 12, 0, 0, tzinfo=timezone.utc)
