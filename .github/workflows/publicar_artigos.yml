@@ -2,7 +2,9 @@ name: Publicar Artigos Aprovados
 
 on:
   schedule:
-    # Verifica aprovação 4x/dia, seg-sex: 09h, 12h, 15h, 17h BRT (12h, 15h, 18h, 20h UTC)
+    # Segunda 08h30 BRT (11h30 UTC) — catch prioritário para aprovações de domingo à noite
+    - cron: '30 11 * * 1'
+    # Seg-Sex: 09h, 12h, 15h, 17h BRT (12h, 15h, 18h, 20h UTC) — polling regular
     - cron: '0 12,15,18,20 * * 1-5'
   workflow_dispatch:  # disparo manual para testes
 
