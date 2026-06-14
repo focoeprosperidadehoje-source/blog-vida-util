@@ -1,0 +1,58 @@
+name: Publicar Artigos Aprovados
+
+on:
+  schedule:
+    # Verifica aprovação 4x/dia, seg-sex: 09h, 12h, 15h, 17h BRT (12h, 15h, 18h, 20h UTC)
+    - cron: '0 12,15,18,20 * * 1-5'
+  workflow_dispatch:  # disparo manual para testes
+
+jobs:
+  verificar-e-publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests markdown
+
+      - name: Detectar aprovação no Telegram
+        id: detectar
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/detectar_aprovacao.py
+        # exit 0 = aprovado | exit 1 = pendente | exit 2 = sem sugestão
+        continue-on-error: true
+
+      - name: Gerar e publicar artigos
+        if: steps.detectar.outcome == 'success'
+        env:
+          GEMINI_API_KEY_PRIMARY: ${{ secrets.GEMINI_API_KEY_PRIMARY }}
+          GEMINI_API_KEY_BACKUP:  ${{ secrets.GEMINI_API_KEY_BACKUP }}
+          WORDPRESS_URL:           ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:          ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD:  ${{ secrets.WORDPRESS_APP_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
+          ML_PUBLISHER_ID:         ${{ secrets.ML_PUBLISHER_ID }}
+          ML_TRACKING_WORD:        ${{ secrets.ML_TRACKING_WORD }}
+        run: python scripts/gerar_artigo.py
+
+      - name: Salvar estado no repositório
+        if: always()
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "data: atualiza estado $(date +%Y-%m-%dT%H:%M) [skip ci]"
+          git push || true
