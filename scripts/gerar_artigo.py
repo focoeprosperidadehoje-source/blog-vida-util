@@ -476,7 +476,8 @@ def main():
     data_brt_fim  = (proxima_data + timedelta(days=len(mlbs_pendentes)-1)).astimezone(BRT).strftime('%d/%m')
     print(f'[INFO] Agendamento: {data_brt_ini} a {data_brt_fim} (09h BRT cada)')
 
-    posts_criados = []
+    # Inicializa da sessão anterior (tolerante a reexecuções parciais)
+    posts_criados = aprovacao.get('posts_criados', [])
 
     for mlb_id in mlbs_pendentes:
         print(f'\n[INFO] ── {mlb_id} ──')
@@ -509,16 +510,20 @@ def main():
         wc_id = criar_produto_wc(produto)
 
         posts_criados.append({
-            'mlb_id':   mlb_id,
-            'post_id':  post_id,
-            'wc_id':    wc_id,
-            'titulo':   produto['title'],
-            'data_pub': proxima_data.isoformat(),
+            'mlb_id':      mlb_id,
+            'post_id':     post_id,
+            'wc_id':       wc_id,
+            'titulo':      produto['title'],
+            'imagem_url':  produto['imagem_url'],
+            'slug':        slugify(produto['title']) + '-vale-a-pena',
+            'capa_gerada': False,
+            'data_pub':    proxima_data.isoformat(),
         })
 
-        # Salva progresso parcial (tolerante a falhas intermediárias)
+        # Salva progresso parcial — gerar_capa.py e atualizar_planilha.py leem posts_criados daqui
         mlbs_processados.add(mlb_id)
         aprovacao['mlbs_processados'] = list(mlbs_processados)
+        aprovacao['posts_criados']    = posts_criados
         salvar_json(APROVACAO_FILE, aprovacao)
 
         proxima_data += timedelta(days=1)  # próximo artigo: +1 dia (seg→dom→seg...)
