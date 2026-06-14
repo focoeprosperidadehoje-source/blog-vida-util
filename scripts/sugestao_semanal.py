@@ -6,6 +6,7 @@ e envia top 7 via Telegram para aprovação semanal.
 Roda toda segunda às 08h BRT via GitHub Actions.
 """
 
+import json
 import os
 import time
 import requests
@@ -198,6 +199,18 @@ def main():
     print('[OK] Top 7 enviados via Telegram:')
     for i, item in enumerate(top7, 1):
         print(f'  {i}. {item["id"]} score={item["_score"]:.0f} — {item["title"][:50]}')
+
+    # Salva estado para o detector de aprovação
+    os.makedirs('data', exist_ok=True)
+    sugestao = {
+        'data': datetime.now().isoformat(),
+        'semana': data_semana,
+        'mlbs': [item['id'] for item in top7],
+        'processado': False,
+    }
+    with open('data/ultima_sugestao.json', 'w', encoding='utf-8') as f:
+        json.dump(sugestao, f, ensure_ascii=False, indent=2)
+    print('[OK] data/ultima_sugestao.json salvo')
 
 
 if __name__ == '__main__':
