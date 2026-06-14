@@ -1,0 +1,31 @@
+name: Sugestão Semanal de Produtos
+
+on:
+  schedule:
+    - cron: '0 11 * * 1'  # segunda-feira 11h UTC = 08h BRT (UTC-3)
+  workflow_dispatch:       # disparo manual para testes
+
+jobs:
+  sugestao:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      - name: Executar sugestão semanal
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ML_PUBLISHER_ID:    ${{ secrets.ML_PUBLISHER_ID }}
+          ML_TRACKING_WORD:   ${{ secrets.ML_TRACKING_WORD }}
+        run: python scripts/sugestao_semanal.py
