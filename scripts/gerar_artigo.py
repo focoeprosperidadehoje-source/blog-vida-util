@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
 gerar_artigo.py — Blog Vida Útil
-Para cada MLB aprovado: busca dados no ML, gera artigo com Gemini,
-publica no WordPress como post agendado (1 artigo/dia, 09h BRT).
-Lê data/aprovacao_atual.json | Atualiza data/ultima_sugestao.json ao concluir.
+Ciclo semanal: segunda Leandro aprova → este script roda uma vez →
+cria artigo + produto WooCommerce para cada MLB aprovado →
+agenda publicação 1 por dia, seg a dom, 09h BRT.
+Repete na segunda seguinte com nova sugestão.
+
+Lê  : data/aprovacao_atual.json
+Grava: data/aprovacao_atual.json (progresso parcial + processado=True ao fim)
+       data/ultima_sugestao.json (processado=True ao fim)
 """
 
 import json
@@ -23,9 +28,9 @@ GEMINI_KEYS = [
     os.environ.get('GEMINI_API_KEY_PRIMARY'),
     os.environ.get('GEMINI_API_KEY_BACKUP'),
 ]
-WP_URL       = os.environ['WORDPRESS_URL'].rstrip('/')
-WP_USER      = os.environ['WORDPRESS_USER']
-WP_PASS      = os.environ['WORDPRESS_APP_PASSWORD']
+WP_URL           = os.environ['WORDPRESS_URL'].rstrip('/')
+WP_USER          = os.environ['WORDPRESS_USER']
+WP_PASS          = os.environ['WORDPRESS_APP_PASSWORD']
 TELEGRAM_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 ML_PUBLISHER_ID  = os.environ.get('ML_PUBLISHER_ID', '65450483')
@@ -35,6 +40,7 @@ DATA_DIR       = 'data'
 APROVACAO_FILE = f'{DATA_DIR}/aprovacao_atual.json'
 SUGESTAO_FILE  = f'{DATA_DIR}/ultima_sugestao.json'
 
+# UTC-3 (BRT, sem horário de verão no Brasil desde 2019)
 BRT = timezone(timedelta(hours=-3))
 
 WP_AUTH = b64encode(f'{WP_USER}:{WP_PASS}'.encode()).decode()
@@ -43,25 +49,21 @@ WP_HEADERS = {
     'Content-Type':  'application/json',
 }
 
-# Mapeamento de palavras-chave → categoria WP
+# Mapeamento título → categoria WP (blog e WooCommerce usam os mesmos IDs)
 CATEGORIA_KEYWORDS = {
-    'seguranca': [
-        'câmera', 'camera', 'sensor', 'fechadura', 'alarme', 'vigilância',
-        'vigilancia', 'segurança', 'seguranca',
-    ],
+    'seguranca': ['câmera', 'camera', 'sensor', 'fechadura', 'alarme', 'vigilância', 'vigilancia'],
     'iluminacao': ['lâmpada', 'lampada', 'led', 'dimmer', 'iluminação', 'iluminacao'],
     'audio':      ['echo', 'alexa', 'google home', 'alto-falante', 'speaker', 'caixa de som'],
-    'eletro':     [
-        'robô', 'robo', 'aspirador', 'airfryer', 'air fryer', 'smartband',
-        'smart band', 'geladeira', 'fire tv', 'roku', 'comedouro', 'tv stick',
-    ],
+    'eletro':     ['robô', 'robo', 'aspirador', 'airfryer', 'air fryer', 'smartband',
+                   'smart band', 'geladeira', 'fire tv', 'roku', 'comedouro', 'tv stick'],
 }
+# IDs de categorias no WP (valem para posts E para WooCommerce)
 WP_CATEGORIA_IDS = {
-    'seguranca': 20,
-    'iluminacao': 19,
-    'audio':      21,
-    'eletro':     22,
-    'default':    17,
+    'seguranca': 20,   # Segurança
+    'iluminacao': 19,  # Iluminação Inteligente
+    'audio':      21,  # Áudio e Assistentes
+    'eletro':     22,  # Eletrodomésticos Inteligentes
+    'default':    17,  # Automação Residencial
 }
 
 GEMINI_MODEL = 'gemini-2.5-flash'
@@ -200,12 +202,20 @@ def formatar_preco(v) -> str:
         return str(v)
 
 
+def link_afiliado_ml(mlb_id: str) -> str:
+    return (
+        f'https://www.mercadolivre.com.br/affiliates/items'
+        f'?id={mlb_id}'
+        f'&publisher_id={ML_PUBLISHER_ID}'
+        f'&tracking_word={ML_TRACKING_WORD}'
+    )
+
+
 # === ML API ===
 
 def buscar_produto_ml(mlb_id: str) -> dict | None:
     headers = {'User-Agent': 'Blog-Vida-Util-Bot/1.0'}
 
-    # Dados principais
     r = requests.get(
         f'https://api.mercadolibre.com/items/{mlb_id}',
         headers=headers, timeout=15,
@@ -215,15 +225,18 @@ def buscar_produto_ml(mlb_id: str) -> dict | None:
         return None
     item = r.json()
 
-    # Especificações técnicas
     specs = []
     for attr in item.get('attributes', []):
-        nome = attr.get('name', '')
+        nome  = attr.get('name', '')
         valor = attr.get('value_name', '')
         if nome and valor and valor != 'N/A':
             specs.append(f'- {nome}: {valor}')
 
-    # Descrição do produto (endpoint separado)
+    # Imagem principal do anúncio
+    pictures   = item.get('pictures', [])
+    imagem_url = pictures[0].get('url', '') if pictures else item.get('thumbnail', '')
+
+    # Descrição do produto
     descricao = ''
     rd = requests.get(
         f'https://api.mercadolibre.com/items/{mlb_id}/descriptions',
@@ -235,13 +248,15 @@ def buscar_produto_ml(mlb_id: str) -> dict | None:
             descricao = descs[0].get('plain_text', '')[:800]
 
     return {
-        'id':       mlb_id,
-        'title':    item.get('title', mlb_id),
-        'price':    item.get('price', 0),
-        'vendas':   item.get('sold_quantity', 0),
-        'garantia': item.get('warranty', 'Verificar anúncio'),
-        'specs':    '\n'.join(specs[:15]) or 'Verificar anúncio no Mercado Livre',
-        'descricao': descricao or 'Produto para casa inteligente disponível no Mercado Livre.',
+        'id':         mlb_id,
+        'title':      item.get('title', mlb_id),
+        'price':      item.get('price', 0),
+        'vendas':     item.get('sold_quantity', 0),
+        'garantia':   item.get('warranty', 'Verificar anúncio'),
+        'specs':      '\n'.join(specs[:15]) or 'Verificar anúncio no Mercado Livre',
+        'descricao':  descricao or 'Produto para casa inteligente disponível no Mercado Livre.',
+        'imagem_url': imagem_url,
+        'permalink':  item.get('permalink', ''),
     }
 
 
@@ -251,16 +266,16 @@ def chamar_gemini(prompt: str) -> str | None:
     for chave in GEMINI_KEYS:
         if not chave:
             continue
-        url = f'{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={chave}'
+        url  = f'{GEMINI_BASE}/{GEMINI_MODEL}:generateContent?key={chave}'
         body = {
-            'contents': [{'parts': [{'text': prompt}]}],
+            'contents':        [{'parts': [{'text': prompt}]}],
             'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 8192},
         }
         try:
             r = requests.post(url, json=body, timeout=120)
             if r.status_code == 429:
-                print(f'[WARN] Gemini quota esgotada ({chave[:20]}...) — tentando próxima chave')
-                time.sleep(3)
+                print(f'[WARN] Gemini quota esgotada — tentando próxima chave')
+                time.sleep(5)
                 continue
             r.raise_for_status()
             candidates = r.json().get('candidates', [])
@@ -283,7 +298,7 @@ def gerar_artigo_gemini(produto: dict) -> str | None:
         descricao=produto['descricao'],
     )
     texto = chamar_gemini(prompt)
-    time.sleep(6)  # respeita limite rate Gemini
+    time.sleep(6)  # respeita rate limit Gemini entre chamadas
     return texto
 
 
@@ -292,8 +307,6 @@ def gerar_artigo_gemini(produto: dict) -> str | None:
 def montar_conteudo_wp(artigo_md: str, mlb_id: str) -> str:
     card = BLOCO_CARD.format(mlb=mlb_id)
 
-    # Substitui placeholders ANTES de converter Markdown → HTML
-    # (os blocos HTML passam intactos pelo conversor)
     conteudo = artigo_md
     conteudo = conteudo.replace(
         '[PLACEHOLDER_CTA_INICIO]',
@@ -302,22 +315,20 @@ def montar_conteudo_wp(artigo_md: str, mlb_id: str) -> str:
     conteudo = conteudo.replace('[PLACEHOLDER_CTA_MEIO]',  f'\n\n{card}\n\n')
     conteudo = conteudo.replace('[PLACEHOLDER_CTA_FINAL]', f'\n\n{card}\n\n')
 
-    # Converte Markdown → HTML (tabelas, listas, negrito, headings)
-    html = markdown.markdown(
-        conteudo,
-        extensions=['tables', 'extra'],
-    )
-    return html
+    return markdown.markdown(conteudo, extensions=['tables', 'extra'])
 
 
-# === WordPress API ===
+# === WordPress — Post ===
 
 def calcular_proxima_data() -> datetime:
-    """Retorna a próxima data de publicação disponível (1/dia, 09h BRT = 12h UTC)."""
+    """
+    Retorna a próxima data livre para agendamento.
+    Agenda 1 artigo/dia seg a dom, 09h BRT (12h UTC).
+    Consulta posts já agendados (status=future) para não colidir.
+    """
     hoje_brt = datetime.now(BRT).date()
     amanha   = hoje_brt + timedelta(days=1)
 
-    # Busca posts futuros agendados
     r = requests.get(
         f'{WP_URL}/wp-json/wp/v2/posts',
         headers=WP_HEADERS,
@@ -329,8 +340,7 @@ def calcular_proxima_data() -> datetime:
     if posts_futuros:
         ultima_str = posts_futuros[0].get('date', '')
         try:
-            # WP retorna datas no timezone configurado do blog (BRT)
-            ultima = datetime.fromisoformat(ultima_str).date()
+            ultima  = datetime.fromisoformat(ultima_str).date()
             proxima = max(ultima + timedelta(days=1), amanha)
         except ValueError:
             proxima = amanha
@@ -343,15 +353,13 @@ def calcular_proxima_data() -> datetime:
 
 def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
     titulo    = produto['title']
-    slug_base = slugify(titulo) + '-vale-a-pena'
+    slug      = slugify(titulo) + '-vale-a-pena'
     categoria = detectar_categoria(titulo)
-
-    # Formata data para WordPress (ISO 8601 UTC → WP aceita em UTC com sufixo Z)
-    date_str = data_pub.strftime('%Y-%m-%dT%H:%M:%S')
+    date_str  = data_pub.strftime('%Y-%m-%dT%H:%M:%S')
 
     payload = {
         'title':          titulo,
-        'slug':           slug_base,
+        'slug':           slug,
         'content':        conteudo,
         'status':         'future',
         'date_gmt':       date_str,
@@ -359,34 +367,78 @@ def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
         'comment_status': 'open',
         'meta':           {'_kad_post_feature_position': 'right center'},
     }
-
     r = requests.post(
         f'{WP_URL}/wp-json/wp/v2/posts',
-        headers=WP_HEADERS,
-        json=payload,
-        timeout=30,
+        headers=WP_HEADERS, json=payload, timeout=30,
     )
     if not r.ok:
-        print(f'[ERRO] WP {r.status_code}: {r.text[:300]}')
+        print(f'[ERRO] WP post {r.status_code}: {r.text[:300]}')
         return None
 
     post_id = r.json().get('id')
     link    = r.json().get('link', '')
-    print(f'[OK] Post ID {post_id} agendado para {date_str} UTC — {link}')
+    data_brt = data_pub.astimezone(BRT).strftime('%d/%m %H:%Mh BRT')
+    print(f'[OK] Post ID {post_id} agendado {data_brt} — {link}')
     return post_id
+
+
+# === WooCommerce — Produto na loja ===
+
+def criar_produto_wc(produto: dict) -> int | None:
+    """
+    Cria produto do tipo 'external' na loja WooCommerce.
+    Ao clicar em 'Ver no Mercado Livre', o cliente é redirecionado
+    para o link de afiliado — sem armazenar pagamentos.
+    """
+    titulo    = produto['title']
+    categoria = detectar_categoria(titulo)
+    preco_str = str(produto['price'])
+    link_ml   = link_afiliado_ml(produto['id'])
+
+    # Descrição curta: primeiras 2 frases da descrição ML
+    desc_curta = produto['descricao']
+    frases = re.split(r'(?<=[.!?])\s+', desc_curta)
+    short_desc = ' '.join(frases[:2]) if frases else desc_curta
+
+    payload: dict = {
+        'name':             titulo,
+        'type':             'external',
+        'external_url':     link_ml,
+        'button_text':      'Ver no Mercado Livre',
+        'regular_price':    preco_str,
+        'short_description': short_desc,
+        'description':      produto['descricao'],
+        'categories':       [{'id': categoria}],
+        'status':           'publish',
+    }
+
+    # Imagem do produto (WooCommerce tenta baixar via src)
+    if produto.get('imagem_url'):
+        payload['images'] = [{'src': produto['imagem_url'], 'alt': titulo}]
+
+    r = requests.post(
+        f'{WP_URL}/wp-json/wc/v3/products',
+        headers=WP_HEADERS, json=payload, timeout=30,
+    )
+    if not r.ok:
+        print(f'[ERRO] WC produto {r.status_code}: {r.text[:300]}')
+        return None
+
+    wc_id = r.json().get('id')
+    print(f'[OK] Produto WooCommerce ID {wc_id} criado — {titulo[:50]}')
+    return wc_id
 
 
 # === Telegram ===
 
 def enviar_telegram(texto: str):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-    payload = {
+    requests.post(url, json={
         'chat_id':                  TELEGRAM_CHAT_ID,
         'text':                     texto,
         'parse_mode':               'HTML',
         'disable_web_page_preview': True,
-    }
-    requests.post(url, json=payload, timeout=15)
+    }, timeout=15)
 
 
 # === Main ===
@@ -394,14 +446,13 @@ def enviar_telegram(texto: str):
 def main():
     print(f'[INFO] {datetime.now().isoformat()} — geração de artigos iniciada')
 
-    # 1. Lê aprovação
     aprovacao = ler_json(APROVACAO_FILE)
     if not aprovacao:
-        print('[ERRO] data/aprovacao_atual.json não encontrado — rode detectar_aprovacao.py primeiro')
+        print('[ERRO] data/aprovacao_atual.json não encontrado')
         sys.exit(1)
 
     if aprovacao.get('processado'):
-        print(f'[INFO] Aprovação da semana {aprovacao.get("semana")} já processada — nada a fazer')
+        print(f'[INFO] Semana {aprovacao.get("semana")} já processada — nada a fazer')
         sys.exit(0)
 
     mlbs_aprovados   = aprovacao.get('mlbs_aprovados', [])
@@ -409,91 +460,91 @@ def main():
     mlbs_pendentes   = [m for m in mlbs_aprovados if m not in mlbs_processados]
 
     if not mlbs_pendentes:
-        print('[INFO] Todos os MLBs já foram processados')
         aprovacao['processado'] = True
         salvar_json(APROVACAO_FILE, aprovacao)
         sys.exit(0)
 
-    print(f'[INFO] {len(mlbs_pendentes)} MLBs para processar: {mlbs_pendentes}')
+    print(f'[INFO] {len(mlbs_pendentes)} produtos para processar: {mlbs_pendentes}')
 
-    # 2. Calcula data inicial
-    proxima_data = calcular_proxima_data()
-    print(f'[INFO] Primeiro agendamento: {proxima_data.isoformat()}')
+    proxima_data  = calcular_proxima_data()
+    data_brt_ini  = proxima_data.astimezone(BRT).strftime('%d/%m')
+    data_brt_fim  = (proxima_data + timedelta(days=len(mlbs_pendentes)-1)).astimezone(BRT).strftime('%d/%m')
+    print(f'[INFO] Agendamento: {data_brt_ini} a {data_brt_fim} (09h BRT cada)')
 
     posts_criados = []
 
     for mlb_id in mlbs_pendentes:
-        print(f'\n[INFO] Processando {mlb_id}...')
+        print(f'\n[INFO] ── {mlb_id} ──')
 
-        # 3a. Busca produto no ML
         produto = buscar_produto_ml(mlb_id)
         if not produto:
-            print(f'[WARN] Falha ao buscar {mlb_id} — pulando')
+            print(f'[WARN] ML API falhou para {mlb_id} — pulando')
             continue
 
-        print(f'[INFO] Produto: {produto["title"]} | R$ {formatar_preco(produto["price"])}')
+        print(f'[INFO] {produto["title"]} | R$ {formatar_preco(produto["price"])}')
 
-        # 3b. Gera artigo com Gemini
+        # Gera artigo com Gemini
         artigo_md = gerar_artigo_gemini(produto)
         if not artigo_md:
             print(f'[ERRO] Gemini falhou para {mlb_id} — pulando')
             continue
 
-        palavras = len(re.sub(r'<[^>]+>', '', artigo_md).split())
-        print(f'[INFO] Artigo gerado: {palavras} palavras')
+        palavras = len(re.sub(r'\[.*?\]|\<[^>]+>', '', artigo_md).split())
+        print(f'[INFO] Artigo: {palavras} palavras')
 
-        # 3c. Monta conteúdo WordPress
         conteudo_wp = montar_conteudo_wp(artigo_md, mlb_id)
 
-        # 3d. Publica no WordPress
+        # Publica artigo no WordPress
         post_id = publicar_wp(produto, conteudo_wp, proxima_data)
         if not post_id:
-            print(f'[ERRO] Publicação WP falhou para {mlb_id} — pulando')
+            print(f'[ERRO] WP falhou para {mlb_id} — pulando')
             continue
 
+        # Cria produto na loja WooCommerce
+        wc_id = criar_produto_wc(produto)
+
         posts_criados.append({
-            'mlb_id':     mlb_id,
-            'post_id':    post_id,
-            'titulo':     produto['title'],
-            'data_pub':   proxima_data.isoformat(),
+            'mlb_id':   mlb_id,
+            'post_id':  post_id,
+            'wc_id':    wc_id,
+            'titulo':   produto['title'],
+            'data_pub': proxima_data.isoformat(),
         })
 
-        # 3e. Atualiza estado parcial (resistente a falhas intermediárias)
+        # Salva progresso parcial (tolerante a falhas intermediárias)
         mlbs_processados.add(mlb_id)
         aprovacao['mlbs_processados'] = list(mlbs_processados)
         salvar_json(APROVACAO_FILE, aprovacao)
 
-        proxima_data += timedelta(days=1)
+        proxima_data += timedelta(days=1)  # próximo artigo: +1 dia (seg→dom→seg...)
 
-    # 4. Marca semana como concluída
-    todos_processados = mlbs_processados >= set(mlbs_aprovados)
-    if todos_processados:
+    # Marca semana como concluída
+    if mlbs_processados >= set(mlbs_aprovados):
         aprovacao['processado'] = True
         salvar_json(APROVACAO_FILE, aprovacao)
-
-        # Marca também a sugestão como processada
         sugestao = ler_json(SUGESTAO_FILE, {})
         sugestao['processado'] = True
         salvar_json(SUGESTAO_FILE, sugestao)
-        print('\n[OK] Semana concluída — sugestão marcada como processada')
+        print('\n[OK] Todos os produtos da semana processados')
 
-    # 5. Resumo via Telegram
+    # Resumo Telegram
     if posts_criados:
         linhas = [
-            f'<b>✅ Artigos agendados — {aprovacao.get("semana", "")}</b>',
-            f'{len(posts_criados)} posts criados:\n',
+            f'<b>✅ Semana {aprovacao.get("semana", "")} — pipeline concluído</b>',
+            f'{len(posts_criados)} artigos + produtos criados:\n',
         ]
         for p in posts_criados:
-            data_brt = datetime.fromisoformat(p['data_pub']).astimezone(BRT)
+            data_pub = datetime.fromisoformat(p['data_pub']).astimezone(BRT)
+            wc_info  = f'WC #{p["wc_id"]}' if p.get('wc_id') else 'WC: falhou'
             linhas.append(
                 f'• <b>{p["titulo"][:45]}</b>\n'
-                f'  Post ID {p["post_id"]} | {data_brt.strftime("%d/%m %H:%Mh BRT")}\n'
+                f'  📅 {data_pub.strftime("%d/%m %H:%Mh BRT")} | Post #{p["post_id"]} | {wc_info}\n'
                 f'  <code>{p["mlb_id"]}</code>'
             )
-        linhas.append('\n<i>Capas serão geradas pelo pipeline 9c</i>')
+        linhas.append('\n<i>⚠️ Capas serão adicionadas manualmente — pipeline 9c pendente</i>')
         enviar_telegram('\n'.join(linhas))
 
-    print(f'\n[OK] Concluído: {len(posts_criados)}/{len(mlbs_pendentes)} artigos publicados')
+    print(f'\n[OK] {len(posts_criados)}/{len(mlbs_pendentes)} produtos processados com sucesso')
 
 
 if __name__ == '__main__':
