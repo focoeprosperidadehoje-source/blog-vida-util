@@ -3,7 +3,7 @@
 sugestao_semanal.py — Blog Vida Útil
 Consulta produtos trending Casa Inteligente no Mercado Livre
 e envia top 7 via Telegram para aprovação semanal.
-Roda toda segunda às 08h BRT via GitHub Actions.
+Roda todo domingo às 18h BRT via GitHub Actions.
 """
 
 import json
@@ -38,9 +38,12 @@ BUSCAS = [
     'sensor porta janela wifi tuya',
 ]
 
-PRECO_MIN = 40.0
+PRECO_MIN = 25.0   # rebaixado de 40 → cobre smart plugs e sensores baratos
 PRECO_MAX = 2500.0
-VENDAS_MIN = 20
+# NOTA: sold_quantity NÃO é retornado na busca do ML — a API ordena por mais
+# vendidos mas não devolve o campo. Filtrar por vendas mínimas eliminaria tudo.
+# O sort=sold_quantity já garante que os primeiros resultados são os mais vendidos.
+VENDAS_MIN = 0
 
 # MLBs já publicados no blog — atualizar a cada novo artigo publicado
 MLB_PUBLICADOS = {
@@ -56,7 +59,7 @@ MLB_PUBLICADOS = {
 }
 
 
-def buscar_ml(query: str, limit: int = 15) -> list:
+def buscar_ml(query: str, limit: int = 25) -> list:
     """Busca no ML ordenando por mais vendidos, com retry automático."""
     url = f'{ML_BASE}/sites/MLB/search'
     params = {
@@ -78,14 +81,17 @@ def buscar_ml(query: str, limit: int = 15) -> list:
 
 def score(item: dict) -> float:
     """
-    Score de relevância: base em vendas, com bônus para faixa de preço ideal
-    (R$80-600 = melhor relação comissão/conversão) e frete grátis.
+    Score de relevância: base em posição da busca (índice invertido) com bônus
+    para faixa de preço ideal (R$80-600) e frete grátis.
+    sold_quantity não é retornado na busca ML, então não podemos usá-lo diretamente.
     """
-    vendas = float(item.get('sold_quantity') or 0)
+    # Posição na busca como proxy de popularidade (já ordenado por sold_quantity)
+    posicao = item.get('_posicao', 999)
+    s = max(0, 100 - posicao)  # posição 0 = score 100, posição 99 = score 1
+
     preco = item.get('price') or 0
     frete_gratis = item.get('shipping', {}).get('free_shipping', False)
 
-    s = vendas
     if 80 <= preco <= 600:
         s *= 1.3
     elif preco > 1000:
@@ -96,14 +102,12 @@ def score(item: dict) -> float:
 
 
 def elegivel(item: dict) -> bool:
-    """Filtra produto: não publicado, preço e vendas mínimas."""
+    """Filtra produto: não publicado e dentro da faixa de preço."""
     iid = item.get('id', '')
     preco = item.get('price') or 0
-    vendas = item.get('sold_quantity') or 0
     return (
         iid not in MLB_PUBLICADOS
         and PRECO_MIN <= preco <= PRECO_MAX
-        and vendas >= VENDAS_MIN
     )
 
 
@@ -130,10 +134,11 @@ def montar_mensagem(top7: list, data_semana: str) -> str:
         vendas = item.get('sold_quantity') or 0
         link = item.get('permalink', f'https://produto.mercadolivre.com.br/{iid}')
         frete = ' 🚚 Frete grátis' if item.get('shipping', {}).get('free_shipping') else ''
+        vendas_str = f' · 📦 {vendas:,} vendidos' if vendas > 0 else ''
 
         linhas.append(
             f'<b>{i}. {nome}</b>\n'
-            f'💰 {preco} · 📦 {vendas:,} vendidos{frete}\n'
+            f'💰 {preco}{vendas_str}{frete}\n'
             f'🔗 <a href="{link}">{iid}</a>\n'
             f'<code>{iid}</code>'
         )
@@ -167,11 +172,12 @@ def main():
         print(f'[INFO] buscando: {query}')
         items = buscar_ml(query)
         novos = 0
-        for item in items:
+        for posicao, item in enumerate(items):
             iid = item.get('id', '')
             if iid in vistos:
                 continue
             vistos.add(iid)
+            item['_posicao'] = posicao  # usado no score
             if elegivel(item):
                 item['_score'] = score(item)
                 candidatos.append(item)
