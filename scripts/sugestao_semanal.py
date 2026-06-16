@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
 sugestao_semanal.py — Blog Vida Útil
-Consulta produtos trending Casa Inteligente no Mercado Livre
-e envia top 7 via Telegram para aprovação semanal.
+Consulta produtos Casa Inteligente via endpoint autenticado do plugin
+Hostinger Affiliate (OAuth com o Mercado Livre já configurado no WP — a API
+pública do ML retorna 403 para chamadas sem token próprio) e envia top 7 via
+Telegram para aprovação semanal.
 Roda todo domingo às 18h BRT via GitHub Actions.
 """
 
+import html as html_lib
 import os
+import re
 import time
 import requests
+from base64 import b64encode
 from datetime import datetime
 
 from estado_sheets import salvar_estado
@@ -18,8 +23,37 @@ TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 ML_PUBLISHER_ID = os.environ.get('ML_PUBLISHER_ID', '65450483')
 ML_TRACKING_WORD = os.environ.get('ML_TRACKING_WORD', 'casalemaro')
 
-ML_BASE = 'https://api.mercadolibre.com'
-HEADERS = {'User-Agent': 'Blog-Vida-Util-Bot/1.0'}
+# A API pública do ML (api.mercadolibre.com/sites/MLB/search) retorna 403
+# Forbidden para qualquer chamada sem token OAuth próprio — confirmado em
+# 15/06/2026 de múltiplas redes (ver memória pipeline_sugestao_semanal_bloqueios,
+# item 2). A busca de produtos passou a usar o endpoint autenticado do plugin
+# Hostinger Affiliate, que já tem OAuth com o Mercado Livre configurado.
+WP_URL  = os.environ['WORDPRESS_URL'].rstrip('/')
+WP_USER = os.environ['WORDPRESS_USER']
+WP_PASS = os.environ['WORDPRESS_APP_PASSWORD']
+
+WP_AUTH    = b64encode(f'{WP_USER}:{WP_PASS}'.encode()).decode()
+WP_HEADERS = {'Authorization': f'Basic {WP_AUTH}', 'Content-Type': 'application/json'}
+
+# Estrutura do HTML retornado por /hostinger-affiliate-plugin/v1/search-items
+# (confirmado via teste real em 15/06/2026 — cada produto vem como um bloco):
+# <div class="product-search-modal__item-result" title="..." data-asin="MLBxxxx"
+#  data-image-url="..." data-title-shortened="..." data-url="...">
+#   ... <div class="...-rating-label">5 <span>(9 reviews)</span></div>  (opcional)
+#   ... <div class="...-price">R$ 109,99</div>                          (sempre presente)
+ITEM_BLOCK_RE = re.compile(
+    r'<div class="product-search-modal__item-result"\s*'
+    r'title="(?P<title>.*?)"\s*'
+    r'data-asin="(?P<asin>MLB\d+)"\s*'
+    r'data-image-url="(?P<image>[^"]*)"\s*'
+    r'data-title-shortened="[^"]*"\s*'
+    r'data-url="(?P<url>[^"]*)"',
+    re.S,
+)
+PRICE_RE  = re.compile(r'item-result-price">\s*R\$\s*([\d.,]+)')
+RATING_RE = re.compile(r'item-result-rating-label">\s*([\d.,]+)\s*<span>\s*\((\d+)\s*reviews?\)', re.S)
+
+LIMITE_POR_BUSCA = 25  # trim por busca, mesmo padrão do limite anterior da API ML
 
 # Queries cobrindo todo o nicho Casa Inteligente
 BUSCAS = [
@@ -41,9 +75,9 @@ BUSCAS = [
 
 PRECO_MIN = 25.0   # rebaixado de 40 → cobre smart plugs e sensores baratos
 PRECO_MAX = 2500.0
-# NOTA: sold_quantity NÃO é retornado na busca do ML — a API ordena por mais
-# vendidos mas não devolve o campo. Filtrar por vendas mínimas eliminaria tudo.
-# O sort=sold_quantity já garante que os primeiros resultados são os mais vendidos.
+# NOTA: o endpoint do plugin não expõe sold_quantity nem ordenação por vendas
+# — a ordem do HTML retornado é a relevância padrão de busca do ML. Sem esse
+# campo, manter VENDAS_MIN=0 e usar posição + rating/review_count como proxy.
 VENDAS_MIN = 0
 
 # MLBs já publicados no blog — atualizar a cada novo artigo publicado
@@ -60,20 +94,49 @@ MLB_PUBLICADOS = {
 }
 
 
-def buscar_ml(query: str, limit: int = 25) -> list:
-    """Busca no ML ordenando por mais vendidos, com retry automático."""
-    url = f'{ML_BASE}/sites/MLB/search'
-    params = {
-        'q': query,
-        'sort': 'sold_quantity',
-        'limit': limit,
-        'condition': 'new',
-    }
+def parse_preco_brl(texto: str) -> float:
+    """Converte 'R$ 1.234,56' (já sem o prefixo) para float 1234.56."""
+    try:
+        return float(texto.replace('.', '').replace(',', '.'))
+    except ValueError:
+        return 0.0
+
+
+def parse_items_html(html_blob: str) -> list:
+    """Extrai cada produto do HTML do modal de busca do plugin Hostinger."""
+    itens = []
+    blocos = re.split(r'(?=<div class="product-search-modal__item-result")', html_blob)
+    for bloco in blocos:
+        m = ITEM_BLOCK_RE.search(bloco)
+        if not m:
+            continue
+        preco_m  = PRICE_RE.search(bloco)
+        rating_m = RATING_RE.search(bloco)
+        itens.append({
+            'id':           m.group('asin'),
+            'title':        html_lib.unescape(m.group('title')),
+            'price':        parse_preco_brl(preco_m.group(1)) if preco_m else 0.0,
+            'image_url':    m.group('image'),
+            'permalink':    m.group('url'),
+            'rating':       float(rating_m.group(1).replace(',', '.')) if rating_m else 0.0,
+            'review_count': int(rating_m.group(2)) if rating_m else 0,
+        })
+    return itens
+
+
+def buscar_ml(query: str) -> list:
+    """
+    Busca produtos via endpoint autenticado do plugin Hostinger Affiliate
+    (OAuth do plugin com o Mercado Livre — contorna o 403 da API pública do ML).
+    """
+    url = f'{WP_URL}/wp-json/hostinger-affiliate-plugin/v1/search-items'
+    payload = {'keyword': query, 'marketplace': 'mercado'}
     for tentativa in range(3):
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=20)
+            r = requests.post(url, headers=WP_HEADERS, json=payload, timeout=30)
             r.raise_for_status()
-            return r.json().get('results', [])
+            html_blob = r.json().get('data', {}).get('html', '')
+            return parse_items_html(html_blob)[:LIMITE_POR_BUSCA]
         except Exception as e:
             print(f'[WARN] tentativa {tentativa + 1} falhou para "{query}": {e}')
             time.sleep(2 ** tentativa)
@@ -82,22 +145,21 @@ def buscar_ml(query: str, limit: int = 25) -> list:
 
 def score(item: dict) -> float:
     """
-    Score de relevância: base em posição da busca (índice invertido) com bônus
-    para faixa de preço ideal (R$80-600) e frete grátis.
-    sold_quantity não é retornado na busca ML, então não podemos usá-lo diretamente.
+    Score de relevância: base em posição na busca (índice invertido) com bônus
+    para faixa de preço ideal (R$80-600) e produtos com avaliação consistente.
+    O endpoint do plugin não expõe sold_quantity nem frete grátis — rating e
+    review_count (quando presentes) servem como proxy de popularidade real.
     """
-    # Posição na busca como proxy de popularidade (já ordenado por sold_quantity)
     posicao = item.get('_posicao', 999)
     s = max(0, 100 - posicao)  # posição 0 = score 100, posição 99 = score 1
 
     preco = item.get('price') or 0
-    frete_gratis = item.get('shipping', {}).get('free_shipping', False)
-
     if 80 <= preco <= 600:
         s *= 1.3
     elif preco > 1000:
         s *= 0.8
-    if frete_gratis:
+
+    if item.get('review_count', 0) >= 5 and item.get('rating', 0) >= 4.0:
         s *= 1.15
     return s
 
@@ -132,14 +194,14 @@ def montar_mensagem(top7: list, data_semana: str) -> str:
         if len(nome) > 55:
             nome = nome[:52] + '...'
         preco = formatar_preco(item.get('price') or 0)
-        vendas = item.get('sold_quantity') or 0
         link = item.get('permalink', f'https://produto.mercadolivre.com.br/{iid}')
-        frete = ' 🚚 Frete grátis' if item.get('shipping', {}).get('free_shipping') else ''
-        vendas_str = f' · 📦 {vendas:,} vendidos' if vendas > 0 else ''
+        avaliacao = ''
+        if item.get('review_count', 0) > 0:
+            avaliacao = f' · ⭐ {item["rating"]:.1f} ({item["review_count"]} avaliações)'
 
         linhas.append(
             f'<b>{i}. {nome}</b>\n'
-            f'💰 {preco}{vendas_str}{frete}\n'
+            f'💰 {preco}{avaliacao}\n'
             f'🔗 <a href="{link}">{iid}</a>\n'
             f'<code>{iid}</code>'
         )
@@ -184,7 +246,7 @@ def main():
                 candidatos.append(item)
                 novos += 1
         print(f'       → {novos} novos elegíveis (acumulado: {len(candidatos)})')
-        time.sleep(1.2)  # respeita rate limit da API ML
+        time.sleep(1.2)  # evita sobrecarregar o WP (hosting compartilhado) entre buscas
 
     print(f'[INFO] {len(candidatos)} candidatos totais após filtros')
 

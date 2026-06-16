@@ -29,6 +29,11 @@ jobs:
           ML_PUBLISHER_ID:          ${{ secrets.ML_PUBLISHER_ID }}
           ML_TRACKING_WORD:         ${{ secrets.ML_TRACKING_WORD }}
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          WORDPRESS_URL:            ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:           ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD:   ${{ secrets.WORDPRESS_APP_PASSWORD }}
         run: python scripts/sugestao_semanal.py
+        # Busca via endpoint autenticado do plugin Hostinger (WORDPRESS_*) —
+        # a API pública do ML retorna 403 sem OAuth próprio.
         # Estado salvo na aba "estado_pipeline" do Google Sheets — não em data/*.json
         # do repositório, para não expor título/MLB no histórico Git público.
