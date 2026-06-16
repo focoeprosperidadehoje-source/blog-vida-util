@@ -2,9 +2,10 @@
 """
 gerar_video.py — Blog Vida Útil
 Para cada produto sem vídeo no estado "aprovacao_atual" (máx. 1 por execução):
-  1. Baixa 4-6 fotos via ML API + salva no Google Drive
+  1. Baixa a foto do produto (CDN de imagens do ML — ver nota abaixo) + salva no Drive
   2. Gera narração PT-BR com Edge TTS (~35s)
-  3. Monta vídeo vertical 9:16 (1080×1920) com FFmpeg
+  3. Monta vídeo vertical 9:16 (1080×1920) com FFmpeg — efeito Ken Burns (zoom + pan
+     lento) sobre a foto única, já que não há mais um conjunto de 4-8 fotos disponível
   4. Faz upload do vídeo para WP media (URL pública)
   5. Publica no Facebook via Graph API
   6. Publica no Instagram como Reel via Graph API (create → poll → publish)
@@ -12,6 +13,20 @@ Para cada produto sem vídeo no estado "aprovacao_atual" (máx. 1 por execução
   8. Envia resumo via Telegram
 Lê:   estado "aprovacao_atual" (aba estado_pipeline da planilha Google Sheets)
 Grava: estado "aprovacao_atual" (video_publicado, fb_video_id, ig_media_id por post)
+
+IMPORTANTE: este script NÃO chama mais a API pública do Mercado Livre
+(api.mercadolibre.com) — ela bloqueia com 403 qualquer chamada de IP de
+datacenter/cloud, incluindo os runners do GitHub Actions (ver memória
+pipeline_sugestao_semanal_bloqueios, itens 2 e 7 — mesmo bloqueio já corrigido
+em gerar_artigo.py). A foto do produto (uma única, capturada por
+sugestao_semanal.py via search-items e repassada em "imagem_url" dentro de
+"posts_criados") é baixada direto da CDN de imagens do ML
+(http(s)://*.mlstatic.com) — domínio DIFERENTE de api.mercadolibre.com, sem a
+mesma proteção de WAF (confirmado em 16/06/2026: requisição direta a partir de
+um IP de datacenter retornou HTTP 200, com Access-Control-Allow-Origin: "*" e
+sem redirecionamento de bloqueio — ver memória pipeline_sugestao_semanal_bloqueios,
+item 8). Como só há 1 foto por produto (não 4-8 como antes), o vídeo usa essa
+única foto com zoom/pan lento (Ken Burns) em vez de slideshow.
 """
 
 import asyncio
@@ -23,7 +38,6 @@ import tempfile
 import time
 from base64 import b64encode
 from datetime import datetime, timezone, timedelta
-from itertools import cycle, islice
 
 import edge_tts
 import gspread
@@ -88,43 +102,24 @@ def enviar_telegram(texto: str):
         print(f'[WARN] Telegram: {e}')
 
 
-# === ML API ===
+# === Foto do produto (CDN de imagens do ML — sem o bloqueio da api.mercadolibre.com) ===
 
-def buscar_fotos_ml(mlb_id: str) -> list:
-    """Retorna 4-8 URLs de fotos do produto no ML."""
-    headers = {'User-Agent': 'Blog-Vida-Util-Bot/1.0'}
-    urls = []
-
-    r = requests.get(
-        f'https://api.mercadolibre.com/items/{mlb_id}',
-        headers=headers, timeout=15,
-    )
-    if r.ok:
-        for pic in r.json().get('pictures', []):
-            url = pic.get('url', '')
-            if url:
-                urls.append(url)
-
-    # Endpoint dedicado pode ter mais fotos
-    if len(urls) < 4:
-        r2 = requests.get(
-            f'https://api.mercadolibre.com/items/{mlb_id}/pictures',
-            headers=headers, timeout=15,
-        )
-        if r2.ok and isinstance(r2.json(), list):
-            for pic in r2.json():
-                url = pic.get('url', '')
-                if url and url not in urls:
-                    urls.append(url)
-
-    if not urls:
-        return []
-
-    # Garante mínimo de 4 repetindo se necessário
-    if len(urls) < 4:
-        urls = list(islice(cycle(urls), 4))
-
-    return urls[:8]
+def baixar_foto_produto(imagem_url: str, destino: str) -> bool:
+    """
+    Baixa a (única) foto do produto já capturada por sugestao_semanal.py, direto
+    da CDN de imagens do ML (*.mlstatic.com) — ver nota no topo do arquivo sobre
+    por que esse domínio não tem o bloqueio 403 da api.mercadolibre.com.
+    """
+    try:
+        r = requests.get(imagem_url, timeout=15, headers={'User-Agent': 'Blog-Vida-Util-Bot/1.0'})
+        if r.ok:
+            with open(destino, 'wb') as f:
+                f.write(r.content)
+            return True
+        print(f'[ERRO] download foto {r.status_code}: {imagem_url[:70]}')
+    except Exception as e:
+        print(f'[ERRO] download foto: {e}')
+    return False
 
 
 # === Google Drive ===
@@ -157,20 +152,19 @@ def criar_pasta_drive(service, nome: str, parent_id: str) -> str:
     return service.files().create(body=meta, fields='id').execute()['id']
 
 
-def salvar_fotos_drive(mlb_id: str, semana: str, fotos_paths: list) -> None:
-    """Salva fotos no Drive: {semana}/imagens/{mlb_id}/foto1.jpg..."""
+def salvar_foto_drive(mlb_id: str, semana: str, foto_path: str) -> None:
+    """Salva a foto do produto no Drive: {semana}/imagens/{mlb_id}/foto1.jpg"""
     try:
         service = conectar_drive()
         pasta_semana  = criar_pasta_drive(service, semana, DRIVE_ROOT_ID)
         pasta_imgs    = criar_pasta_drive(service, 'imagens', pasta_semana)
         pasta_produto = criar_pasta_drive(service, mlb_id, pasta_imgs)
 
-        for i, foto_path in enumerate(fotos_paths, start=1):
-            media = MediaFileUpload(foto_path, mimetype='image/jpeg', resumable=False)
-            meta  = {'name': f'foto{i}.jpg', 'parents': [pasta_produto]}
-            service.files().create(body=meta, media_body=media, fields='id').execute()
+        media = MediaFileUpload(foto_path, mimetype='image/jpeg', resumable=False)
+        meta  = {'name': 'foto1.jpg', 'parents': [pasta_produto]}
+        service.files().create(body=meta, media_body=media, fields='id').execute()
 
-        print(f'[OK] {len(fotos_paths)} fotos salvas no Drive: {semana}/imagens/{mlb_id}/')
+        print(f'[OK] Foto salva no Drive: {semana}/imagens/{mlb_id}/foto1.jpg')
     except Exception as e:
         print(f'[WARN] Drive upload: {e}')
 
@@ -224,12 +218,24 @@ def duracao_audio(path: str) -> float:
         return 35.0
 
 
-def montar_video(fotos_paths: list, narration_path: str, titulo: str, saida: str) -> bool:
-    """Gera vídeo 1080×1920 9:16 com slideshow de fotos + texto + narração."""
-    n         = len(fotos_paths)
+# Variações de pan do efeito Ken Burns — escolhida por produto (determinística,
+# via soma dos caracteres do MLB ID) só para dar alguma variedade visual entre
+# os vídeos, já que todos partem de uma única foto.
+PAN_VARIANTES = [
+    ('iw/2-(iw/zoom/2)',    'ih/2-(ih/zoom/2)'),     # zoom centrado
+    ('iw*0.65-(iw/zoom/2)', 'ih*0.35-(ih/zoom/2)'),  # zoom canto superior-direito
+    ('iw*0.35-(iw/zoom/2)', 'ih*0.6-(ih/zoom/2)'),   # zoom canto inferior-esquerdo
+]
+
+
+def montar_video(foto_path: str, narration_path: str, titulo: str, mlb_id: str, saida: str) -> bool:
+    """
+    Gera vídeo 1080×1920 9:16 com efeito Ken Burns (zoom + pan lento) sobre a
+    única foto do produto disponível (ver nota no topo do arquivo) + texto
+    sobreposto + narração.
+    """
     dur_audio = duracao_audio(narration_path)
-    # Garante pelo menos 25s totais; mínimo 4s por foto
-    dur_foto  = max(max(25.0, dur_audio) / n, 4.0)
+    dur_total = max(25.0, dur_audio)
 
     txt_titulo = '/tmp/vd_titulo.txt'
     txt_rodape = '/tmp/vd_rodape.txt'
@@ -238,37 +244,32 @@ def montar_video(fotos_paths: list, narration_path: str, titulo: str, saida: str
     with open(txt_rodape, 'w', encoding='utf-8') as f:
         f.write('Ver no Mercado Livre')
 
-    # Cover-crop para 1080×1920 (preenche sem barras)
-    scale_crop = (
-        'scale=iw*max(1080/iw\\,1920/ih):ih*max(1080/iw\\,1920/ih),'
-        'crop=1080:1920,setsar=1'
-    )
-
-    cmd = ['ffmpeg', '-y']
-    for foto in fotos_paths:
-        cmd += ['-loop', '1', '-t', f'{dur_foto:.1f}', '-i', foto]
-    cmd += ['-i', narration_path]
-
-    # Filter complex
-    parts = [f'[{i}:v]{scale_crop}[v{i}]' for i in range(n)]
-    parts.append(f'{"".join(f"[v{i}]" for i in range(n))}concat=n={n}:v=1:a=0[vc]')
+    x_expr, y_expr = PAN_VARIANTES[sum(ord(c) for c in mlb_id) % len(PAN_VARIANTES)]
 
     dt = (
         f'fontfile={FONT_PATH}:shadowcolor=black@0.8:shadowx=3:shadowy=3'
         f':box=1:boxcolor=black@0.5:boxborderw=12'
     )
-    parts.append(
-        f'[vc]drawtext=textfile={txt_titulo}:{dt}'
-        f':fontsize=46:fontcolor=white:x=(w-text_w)/2:y=80[vt]'
-    )
-    parts.append(
+
+    # scale upscale antes do zoompan evita pixelização ao aproximar; zoompan
+    # cuida do crop final para 1080×1920 (cover, sem barras)
+    filtro = (
+        f"scale=2400:-2,"
+        f"zoompan=z='min(zoom+0.0015,1.3)':x='{x_expr}':y='{y_expr}'"
+        f":d=1:s={VIDEO_W}x{VIDEO_H}:fps=25,setsar=1[vz];"
+        f'[vz]drawtext=textfile={txt_titulo}:{dt}'
+        f':fontsize=46:fontcolor=white:x=(w-text_w)/2:y=80[vt];'
         f'[vt]drawtext=textfile={txt_rodape}:{dt}'
         f':fontsize=42:fontcolor=#FFD700:x=(w-text_w)/2:y=h-120[vout]'
     )
 
-    cmd += ['-filter_complex', ';'.join(parts)]
-    cmd += [
-        '-map', '[vout]', '-map', f'{n}:a',
+    cmd = [
+        'ffmpeg', '-y',
+        '-loop', '1', '-i', foto_path,
+        '-i', narration_path,
+        '-t', f'{dur_total:.2f}',
+        '-filter_complex', filtro,
+        '-map', '[vout]', '-map', '1:a',
         '-shortest',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
         '-c:a', 'aac', '-b:a', '128k',
@@ -277,7 +278,7 @@ def montar_video(fotos_paths: list, narration_path: str, titulo: str, saida: str
         saida,
     ]
 
-    print(f'[INFO] FFmpeg: {n} fotos × {dur_foto:.1f}s, áudio {dur_audio:.1f}s')
+    print(f'[INFO] FFmpeg: Ken Burns {dur_total:.1f}s (áudio {dur_audio:.1f}s)')
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(f'[ERRO] FFmpeg:\n{r.stderr[-600:]}')
@@ -447,9 +448,10 @@ def montar_caption(titulo: str, slug: str) -> str:
 # === Pipeline por produto ===
 
 def processar_produto(post: dict, semana: str, tmp_dir: str) -> dict:
-    mlb_id = post['mlb_id']
-    titulo = post['titulo']
-    slug   = post.get('slug', mlb_id.lower())
+    mlb_id     = post['mlb_id']
+    titulo     = post['titulo']
+    slug       = post.get('slug', mlb_id.lower())
+    imagem_url = post.get('imagem_url', '')
 
     resultado = {
         'mlb_id':    mlb_id,
@@ -462,48 +464,34 @@ def processar_produto(post: dict, semana: str, tmp_dir: str) -> dict:
 
     print(f'\n[INFO] ── Vídeo {mlb_id}: {titulo[:50]} ──')
 
-    # 1. Fotos ML
-    foto_urls = buscar_fotos_ml(mlb_id)
-    if not foto_urls:
-        resultado['erro'] = 'Sem fotos no ML'
+    # 1. Foto do produto (única — já capturada na sugestão semanal, ver nota no topo)
+    if not imagem_url:
+        resultado['erro'] = 'Sem imagem_url no estado salvo'
         return resultado
-    print(f'[INFO] {len(foto_urls)} URLs de fotos encontradas')
 
-    # 2. Baixar fotos
-    fotos_paths = []
-    for i, url in enumerate(foto_urls, start=1):
-        try:
-            r = requests.get(url, timeout=15, headers={'User-Agent': 'Blog-Vida-Util-Bot/1.0'})
-            if r.ok:
-                path = os.path.join(tmp_dir, f'foto{i}.jpg')
-                with open(path, 'wb') as f:
-                    f.write(r.content)
-                fotos_paths.append(path)
-        except Exception as e:
-            print(f'[WARN] Foto {i}: {e}')
-
-    if len(fotos_paths) < 2:
-        resultado['erro'] = 'Fotos insuficientes (<2)'
+    foto_path = os.path.join(tmp_dir, 'foto1.jpg')
+    if not baixar_foto_produto(imagem_url, foto_path):
+        resultado['erro'] = 'Download da foto falhou'
         return resultado
-    print(f'[INFO] {len(fotos_paths)} fotos baixadas')
+    print('[INFO] Foto do produto baixada')
 
-    # 3. Drive (não-crítico)
-    salvar_fotos_drive(mlb_id, semana, fotos_paths)
+    # 2. Drive (não-crítico)
+    salvar_foto_drive(mlb_id, semana, foto_path)
     resultado['drive'] = True
 
-    # 4. Narração
+    # 3. Narração
     narration_path = os.path.join(tmp_dir, 'narracao.mp3')
     if not gerar_narracao(gerar_texto_narracao(titulo), narration_path):
         resultado['erro'] = 'Edge TTS falhou'
         return resultado
 
-    # 5. Vídeo
+    # 4. Vídeo (Ken Burns sobre a foto única)
     video_path = os.path.join(tmp_dir, f'video-{slug}.mp4')
-    if not montar_video(fotos_paths, narration_path, titulo, video_path):
+    if not montar_video(foto_path, narration_path, titulo, mlb_id, video_path):
         resultado['erro'] = 'FFmpeg falhou'
         return resultado
 
-    # 6. Upload WP (URL pública para Meta)
+    # 5. Upload WP (URL pública para Meta)
     video_url = upload_video_wp(video_path, slug, titulo)
     if not video_url:
         resultado['erro'] = 'WP upload falhou'
@@ -511,10 +499,10 @@ def processar_produto(post: dict, semana: str, tmp_dir: str) -> dict:
 
     caption = montar_caption(titulo, slug)
 
-    # 7. Facebook
+    # 6. Facebook
     resultado['facebook'] = publicar_facebook(video_url, titulo, caption)
 
-    # 8. Instagram Reel
+    # 7. Instagram Reel
     resultado['instagram'] = publicar_instagram(video_url, caption)
 
     return resultado
@@ -573,8 +561,8 @@ def main():
     if resultados:
         linhas = [f'<b>📹 Vídeo Vida Útil — {data_hoje}</b>\n']
         for r in resultados:
-            fb  = f'✅ FB'  if r.get('facebook')  else '❌ FB'
-            ig  = f'✅ IG'  if r.get('instagram') else '❌ IG'
+            fb  = '✅ FB'  if r.get('facebook')  else '❌ FB'
+            ig  = '✅ IG'  if r.get('instagram') else '❌ IG'
             drv = '✅ Drive' if r.get('drive')     else '⚠️ Drive'
             err = f'\n  ⛔ {r["erro"]}' if r.get('erro') else ''
             linhas.append(f'• <b>{r["titulo"][:45]}</b>\n  {fb} | {ig} | {drv}{err}')
