@@ -6,6 +6,16 @@ cria artigo + produto WooCommerce para cada MLB aprovado →
 agenda publicação 1 por dia, seg a dom, 09h BRT.
 Repete na segunda seguinte com nova sugestão.
 
+IMPORTANTE: este script NÃO chama mais a API pública do Mercado Livre
+(api.mercadolibre.com) — ela bloqueia com 403 qualquer chamada de IP de
+datacenter/cloud, incluindo os runners do GitHub Actions (ver memória
+pipeline_sugestao_semanal_bloqueios, item 2). Os dados do produto (título,
+preço, imagem, link, rating) já foram capturados por sugestao_semanal.py via
+endpoint autenticado do plugin Hostinger e chegam aqui em "itens_aprovados"
+(dentro do estado "aprovacao_atual"). Ficha técnica e descrição não estão
+disponíveis — o Gemini é instruído a gerá-las de forma plausível, e a
+descrição do produto WooCommerce é extraída da introdução do próprio artigo.
+
 Lê  : estado "aprovacao_atual" (aba estado_pipeline da planilha Google Sheets)
 Grava: estado "aprovacao_atual" (progresso parcial + processado=True ao fim)
        estado "ultima_sugestao" (processado=True ao fim)
@@ -86,15 +96,19 @@ BLOCO_DISCLOSURE = (
 PROMPT_ARTIGO = """Você é redator especialista em Casa Inteligente para o blog Vida Útil (vidautil.com.br).
 Escreva um artigo de review completo em português brasileiro sobre: "{nome}" (MLB: {mlb_id}).
 
-Dados reais do produto:
+Dados reais do produto (Mercado Livre):
 - Preço atual: R$ {preco}
-- Unidades vendidas: {vendas}
-- Garantia: {garantia}
-Especificações técnicas:
-{specs}
+{avaliacao_linha}
 
-Descrição do fabricante:
-{descricao}
+IMPORTANTE: não temos acesso à ficha técnica oficial do fabricante nem à descrição do
+anúncio para este produto (apenas título, preço{avaliacao_nota_extra} e imagem — a API pública
+do Mercado Livre bloqueia esse tipo de consulta automatizada). Escreva a Ficha Técnica e a
+descrição de funcionamento de forma REALISTA e PLAUSÍVEL, coerente com o título, a categoria e
+a faixa de preço — baseando-se em características típicas de produtos similares reais vendidos
+no Brasil. Não invente normas/certificações específicas que você não tenha certeza de que
+existem; mantenha-se em afirmações genéricas plausíveis (ex.: "compatível com Wi-Fi 2.4GHz",
+"controle via aplicativo", "compatível com Alexa e Google Home" quando fizer sentido para a
+categoria).
 
 REGRAS INVIOLÁVEIS — CONFORMIDADE ADSENSE:
 1. Tom consultivo e imparcial — NÃO escreva como anúncio ou material de marketing
@@ -194,52 +208,25 @@ def link_afiliado_ml(mlb_id: str) -> str:
     )
 
 
-# === ML API ===
+# === Dados do produto ===
+# A API pública do Mercado Livre (api.mercadolibre.com) bloqueia com 403 qualquer
+# chamada feita a partir de IPs de datacenter/cloud — incluindo os runners do
+# GitHub Actions (confirmado em 16/06/2026, ver memória
+# pipeline_sugestao_semanal_bloqueios, item 2). Não há mais nenhuma chamada à API
+# do ML neste script: os dados do produto (título, preço, imagem, link, rating)
+# já foram capturados por sugestao_semanal.py no momento da sugestão, via
+# endpoint autenticado do plugin Hostinger, e chegam aqui através do estado
+# "aprovacao_atual" (campo itens_aprovados). Esta função só remodela esse dict.
 
-def buscar_produto_ml(mlb_id: str) -> dict | None:
-    headers = {'User-Agent': 'Blog-Vida-Util-Bot/1.0'}
-
-    r = requests.get(
-        f'https://api.mercadolibre.com/items/{mlb_id}',
-        headers=headers, timeout=15,
-    )
-    if not r.ok:
-        print(f'[ERRO] ML API {r.status_code} para {mlb_id}')
-        return None
-    item = r.json()
-
-    specs = []
-    for attr in item.get('attributes', []):
-        nome  = attr.get('name', '')
-        valor = attr.get('value_name', '')
-        if nome and valor and valor != 'N/A':
-            specs.append(f'- {nome}: {valor}')
-
-    # Imagem principal do anúncio
-    pictures   = item.get('pictures', [])
-    imagem_url = pictures[0].get('url', '') if pictures else item.get('thumbnail', '')
-
-    # Descrição do produto
-    descricao = ''
-    rd = requests.get(
-        f'https://api.mercadolibre.com/items/{mlb_id}/descriptions',
-        headers=headers, timeout=15,
-    )
-    if rd.ok:
-        descs = rd.json()
-        if descs:
-            descricao = descs[0].get('plain_text', '')[:800]
-
+def montar_produto(item: dict) -> dict:
     return {
-        'id':         mlb_id,
-        'title':      item.get('title', mlb_id),
-        'price':      item.get('price', 0),
-        'vendas':     item.get('sold_quantity', 0),
-        'garantia':   item.get('warranty', 'Verificar anúncio'),
-        'specs':      '\n'.join(specs[:15]) or 'Verificar anúncio no Mercado Livre',
-        'descricao':  descricao or 'Produto para casa inteligente disponível no Mercado Livre.',
-        'imagem_url': imagem_url,
-        'permalink':  item.get('permalink', ''),
+        'id':           item['id'],
+        'title':        item.get('title', item['id']),
+        'price':        item.get('price') or 0,
+        'rating':       item.get('rating') or 0,
+        'review_count': item.get('review_count') or 0,
+        'imagem_url':   item.get('image_url', ''),
+        'permalink':    item.get('permalink', ''),
     }
 
 
@@ -271,18 +258,39 @@ def chamar_gemini(prompt: str) -> str | None:
 
 
 def gerar_artigo_gemini(produto: dict) -> str | None:
+    if produto.get('review_count', 0) > 0:
+        avaliacao_linha = (
+            f'- Avaliação: {produto["rating"]:.1f}/5 '
+            f'({produto["review_count"]} avaliações)'
+        )
+        avaliacao_nota_extra = ', avaliação'
+    else:
+        avaliacao_linha = ''
+        avaliacao_nota_extra = ''
+
     prompt = PROMPT_ARTIGO.format(
         nome=produto['title'],
         mlb_id=produto['id'],
         preco=formatar_preco(produto['price']),
-        vendas=produto['vendas'],
-        garantia=produto['garantia'],
-        specs=produto['specs'],
-        descricao=produto['descricao'],
+        avaliacao_linha=avaliacao_linha,
+        avaliacao_nota_extra=avaliacao_nota_extra,
     )
     texto = chamar_gemini(prompt)
     time.sleep(6)  # respeita rate limit Gemini entre chamadas
     return texto
+
+
+def extrair_intro(artigo_md: str) -> str:
+    """
+    Extrai o(s) parágrafo(s) da seção '## Introdução' do artigo gerado pelo
+    Gemini, para usar como descrição do produto na loja WooCommerce — já que
+    não há mais descrição real do fabricante disponível (ver montar_produto).
+    Garante conteúdo genuíno e específico do produto (não thin content).
+    """
+    m = re.search(r'##\s*Introdução\s*\n+(.*?)(?=\n##\s|\Z)', artigo_md, re.S)
+    intro = m.group(1).strip() if m else ''
+    intro = re.sub(r'\[PLACEHOLDER_[A-Z_]+\]', '', intro).strip()
+    return intro or 'Produto para casa inteligente disponível no Mercado Livre.'
 
 
 # === Processamento de conteúdo ===
@@ -372,21 +380,25 @@ def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
 
 # === WooCommerce — Produto na loja ===
 
-def criar_produto_wc(produto: dict) -> int | None:
+def criar_produto_wc(produto: dict, descricao: str) -> int | None:
     """
     Cria produto do tipo 'external' na loja WooCommerce.
     Ao clicar em 'Ver no Mercado Livre', o cliente é redirecionado
     para o link de afiliado — sem armazenar pagamentos.
+
+    `descricao` vem da introdução do artigo gerado pelo Gemini (ver
+    extrair_intro) — não há mais descrição real do fabricante disponível
+    (API do ML bloqueada), e usar texto genérico violaria a regra de
+    "thin content" do AdSense.
     """
     titulo    = produto['title']
     categoria = detectar_categoria(titulo)
     preco_str = str(produto['price'])
     link_ml   = link_afiliado_ml(produto['id'])
 
-    # Descrição curta: primeiras 2 frases da descrição ML
-    desc_curta = produto['descricao']
-    frases = re.split(r'(?<=[.!?])\s+', desc_curta)
-    short_desc = ' '.join(frases[:2]) if frases else desc_curta
+    # Descrição curta: primeiras 2 frases da introdução do artigo
+    frases = re.split(r'(?<=[.!?])\s+', descricao)
+    short_desc = ' '.join(frases[:2]) if frases else descricao
 
     payload: dict = {
         'name':             titulo,
@@ -395,7 +407,7 @@ def criar_produto_wc(produto: dict) -> int | None:
         'button_text':      'Ver no Mercado Livre',
         'regular_price':    preco_str,
         'short_description': short_desc,
-        'description':      produto['descricao'],
+        'description':      descricao,
         'categories':       [{'id': categoria}],
         'status':           'publish',
     }
@@ -446,6 +458,7 @@ def main():
     mlbs_aprovados   = aprovacao.get('mlbs_aprovados', [])
     mlbs_processados = set(aprovacao.get('mlbs_processados', []))
     mlbs_pendentes   = [m for m in mlbs_aprovados if m not in mlbs_processados]
+    itens_por_mlb    = {item['id']: item for item in aprovacao.get('itens_aprovados', [])}
 
     if not mlbs_pendentes:
         aprovacao['processado'] = True
@@ -467,10 +480,11 @@ def main():
     for idx, mlb_id in enumerate(mlbs_pendentes, 1):
         print(f'\n[INFO] ── produto {idx}/{len(mlbs_pendentes)} ──')
 
-        produto = buscar_produto_ml(mlb_id)
-        if not produto:
-            print(f'[WARN] ML API falhou para o produto {idx} — pulando')
+        item = itens_por_mlb.get(mlb_id)
+        if not item:
+            print(f'[WARN] dados do produto {idx} não encontrados em itens_aprovados — pulando')
             continue
+        produto = montar_produto(item)
 
         # Gera artigo com Gemini
         artigo_md = gerar_artigo_gemini(produto)
@@ -481,6 +495,7 @@ def main():
         palavras = len(re.sub(r'\[.*?\]|\<[^>]+>', '', artigo_md).split())
         print(f'[INFO] Artigo: {palavras} palavras')
 
+        intro_desc  = extrair_intro(artigo_md)
         conteudo_wp = montar_conteudo_wp(artigo_md, mlb_id)
 
         # Publica artigo no WordPress
@@ -489,8 +504,8 @@ def main():
             print(f'[ERRO] WP falhou para o produto {idx} — pulando')
             continue
 
-        # Cria produto na loja WooCommerce
-        wc_id = criar_produto_wc(produto)
+        # Cria produto na loja WooCommerce (descrição = introdução do artigo)
+        wc_id = criar_produto_wc(produto, intro_desc)
 
         posts_criados.append({
             'mlb_id':      mlb_id,

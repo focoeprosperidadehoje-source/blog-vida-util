@@ -277,10 +277,28 @@ def main():
 
     # Salva estado para o detector de aprovação — planilha Google Sheets, não
     # arquivo no repositório (evita comitar título/MLB no histórico Git público)
+    # IMPORTANTE: salva os dados completos do produto (título, preço, imagem,
+    # link, rating) capturados AGORA via search-items — não só o MLB ID. Isso
+    # evita que gerar_artigo.py precise chamar api.mercadolibre.com de novo
+    # depois da aprovação (chamada que retorna 403 a partir do GitHub Actions —
+    # ver memória pipeline_sugestao_semanal_bloqueios, item 2b).
+    itens_salvos = [
+        {
+            'id':           item['id'],
+            'title':        item['title'],
+            'price':        item.get('price') or 0,
+            'image_url':    item.get('image_url', ''),
+            'permalink':    item.get('permalink', ''),
+            'rating':       item.get('rating', 0),
+            'review_count': item.get('review_count', 0),
+        }
+        for item in top7
+    ]
     sugestao = {
         'data': datetime.now().isoformat(),
         'semana': data_semana,
         'mlbs': [item['id'] for item in top7],
+        'itens': itens_salvos,
         'processado': False,
     }
     salvar_estado('ultima_sugestao', sugestao)

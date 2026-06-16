@@ -49,8 +49,16 @@ def main():
         sys.exit(2)
 
     mlbs_sugeridos = sugestao.get('mlbs', [])
+    itens_sugeridos = sugestao.get('itens', [])
     if not mlbs_sugeridos:
         print('[ERRO] estado "ultima_sugestao" sem MLBs')
+        sys.exit(2)
+    if not itens_sugeridos:
+        # Sugestão de formato antigo (anterior à correção do 403 em gerar_artigo.py) —
+        # não tem os dados completos do produto. Não dá para prosseguir: gerar_artigo.py
+        # não tenta mais buscar isso na API pública do ML (bloqueada). Pedir nova sugestão.
+        print('[ERRO] estado "ultima_sugestao" sem "itens" (formato antigo) — '
+              'rode sugestao_semanal.py de novo para gerar uma sugestão atualizada')
         sys.exit(2)
 
     print(f'[INFO] Sugestão pendente: {len(mlbs_sugeridos)} MLBs da semana {sugestao.get("semana")}')
@@ -97,19 +105,23 @@ def main():
         print('[INFO] Aprovação ainda não recebida — aguardando')
         sys.exit(1)
 
-    # 5. Calcula MLBs aprovados (sugeridos - excluídos)
-    mlbs_aprovados = [m for m in mlbs_sugeridos if m not in mlbs_excluir]
+    # 5. Calcula MLBs aprovados (sugeridos - excluídos) e carrega os dados completos
+    # já capturados na sugestão (título, preço, imagem, link) — gerar_artigo.py usa
+    # isso direto, sem precisar chamar a API do ML de novo (bloqueada por 403).
+    mlbs_aprovados   = [m for m in mlbs_sugeridos if m not in mlbs_excluir]
+    itens_aprovados  = [item for item in itens_sugeridos if item['id'] not in mlbs_excluir]
     if not mlbs_aprovados:
         print('[ERRO] Todos os MLBs foram excluídos — nada a publicar')
         sys.exit(2)
 
     # 6. Salva aprovação
     aprovacao = {
-        'data_aprovacao':  datetime.now().isoformat(),
-        'semana':          sugestao.get('semana'),
-        'mlbs_aprovados':  mlbs_aprovados,
+        'data_aprovacao':   datetime.now().isoformat(),
+        'semana':           sugestao.get('semana'),
+        'mlbs_aprovados':   mlbs_aprovados,
+        'itens_aprovados':  itens_aprovados,
         'mlbs_processados': [],
-        'processado':      False,
+        'processado':       False,
     }
     salvar_estado('aprovacao_atual', aprovacao)
     print(f'[OK] {len(mlbs_aprovados)} MLBs aprovados salvos no estado "aprovacao_atual"')
