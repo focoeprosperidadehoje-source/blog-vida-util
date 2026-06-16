@@ -6,11 +6,12 @@ e envia top 7 via Telegram para aprovação semanal.
 Roda todo domingo às 18h BRT via GitHub Actions.
 """
 
-import json
 import os
 import time
 import requests
 from datetime import datetime
+
+from estado_sheets import salvar_estado
 
 TELEGRAM_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
@@ -205,17 +206,16 @@ def main():
     # Detalhes (MLB, título, score) ficam só no Telegram — não em log público do Actions
     print(f'[OK] Top {len(top7)} enviados via Telegram')
 
-    # Salva estado para o detector de aprovação
-    os.makedirs('data', exist_ok=True)
+    # Salva estado para o detector de aprovação — planilha Google Sheets, não
+    # arquivo no repositório (evita comitar título/MLB no histórico Git público)
     sugestao = {
         'data': datetime.now().isoformat(),
         'semana': data_semana,
         'mlbs': [item['id'] for item in top7],
         'processado': False,
     }
-    with open('data/ultima_sugestao.json', 'w', encoding='utf-8') as f:
-        json.dump(sugestao, f, ensure_ascii=False, indent=2)
-    print('[OK] data/ultima_sugestao.json salvo')
+    salvar_estado('ultima_sugestao', sugestao)
+    print('[OK] estado "ultima_sugestao" salvo na planilha (aba estado_pipeline)')
 
 
 if __name__ == '__main__':

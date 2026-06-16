@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
 gerar_capa.py — Blog Vida Útil
-Para cada artigo sem capa em data/aprovacao_atual.json:
+Para cada artigo sem capa no estado "aprovacao_atual" (aba estado_pipeline):
   1. Imagem ML → remove.bg → PNG transparente (produto sem fundo)
   2. Pexels → fundo contextual ao nicho do produto
   3. Pillow → composição 1200×628px (produto direita, fundo cover)
   4. Upload WP media → define como featured_media do post
-Grava: capa_gerada=True por post em data/aprovacao_atual.json
+Grava: capa_gerada=True por post no estado "aprovacao_atual"
 """
 
 import io
-import json
 import os
 import re
 import sys
@@ -20,14 +19,13 @@ from base64 import b64encode
 import requests
 from PIL import Image
 
+from estado_sheets import ler_estado, salvar_estado
+
 REMOVE_BG_KEY    = os.environ['REMOVE_BG_API_KEY']
 PEXELS_KEY       = os.environ['PEXELS_API_KEY']
 WP_URL           = os.environ['WORDPRESS_URL'].rstrip('/')
 WP_USER          = os.environ['WORDPRESS_USER']
 WP_PASS          = os.environ['WORDPRESS_APP_PASSWORD']
-
-DATA_DIR       = 'data'
-APROVACAO_FILE = f'{DATA_DIR}/aprovacao_atual.json'
 
 WP_AUTH    = b64encode(f'{WP_USER}:{WP_PASS}'.encode()).decode()
 WP_AUTH_H  = {'Authorization': f'Basic {WP_AUTH}'}   # sem Content-Type (multipart usa boundary)
@@ -68,20 +66,6 @@ PEXELS_MAP = {
     'zigbee':      'modern smart home interior',
 }
 PEXELS_DEFAULT = 'modern smart home interior living room'
-
-
-def ler_json(path: str, default=None):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-
-
-def salvar_json(path: str, data: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def slugify(texto: str) -> str:
@@ -252,9 +236,9 @@ def processar_post(post: dict) -> bool:
 
 
 def main():
-    aprovacao = ler_json(APROVACAO_FILE)
+    aprovacao = ler_estado('aprovacao_atual')
     if not aprovacao:
-        print('[ERRO] data/aprovacao_atual.json não encontrado')
+        print('[ERRO] estado "aprovacao_atual" não encontrado na planilha')
         sys.exit(1)
 
     posts = aprovacao.get('posts_criados', [])
@@ -276,7 +260,7 @@ def main():
             ok += 1
         # Salva progresso parcial após cada capa
         aprovacao['posts_criados'] = posts
-        salvar_json(APROVACAO_FILE, aprovacao)
+        salvar_estado('aprovacao_atual', aprovacao)
 
     print(f'\n[OK] {ok}/{len(pendentes)} capas geradas com sucesso')
 

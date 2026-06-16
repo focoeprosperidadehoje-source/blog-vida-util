@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 gerar_video.py — Blog Vida Útil
-Para cada produto sem vídeo em data/aprovacao_atual.json (máx. 1 por execução):
+Para cada produto sem vídeo no estado "aprovacao_atual" (máx. 1 por execução):
   1. Baixa 4-6 fotos via ML API + salva no Google Drive
   2. Gera narração PT-BR com Edge TTS (~35s)
   3. Monta vídeo vertical 9:16 (1080×1920) com FFmpeg
@@ -10,8 +10,8 @@ Para cada produto sem vídeo em data/aprovacao_atual.json (máx. 1 por execuçã
   6. Publica no Instagram como Reel via Graph API (create → poll → publish)
   7. Atualiza planilha controle_publicacoes (video_publicado=TRUE)
   8. Envia resumo via Telegram
-Lê:   data/aprovacao_atual.json
-Grava: data/aprovacao_atual.json (video_publicado, fb_video_id, ig_media_id por post)
+Lê:   estado "aprovacao_atual" (aba estado_pipeline da planilha Google Sheets)
+Grava: estado "aprovacao_atual" (video_publicado, fb_video_id, ig_media_id por post)
 """
 
 import asyncio
@@ -32,6 +32,8 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from estado_sheets import ler_estado, salvar_estado
+
 # === Credenciais ===
 WP_URL           = os.environ['WORDPRESS_URL'].rstrip('/')
 WP_USER          = os.environ['WORDPRESS_USER']
@@ -42,8 +44,6 @@ META_TOKEN       = os.environ['META_PAGE_ACCESS_TOKEN']
 TELEGRAM_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
-DATA_DIR       = 'data'
-APROVACAO_FILE = f'{DATA_DIR}/aprovacao_atual.json'
 SPREADSHEET_ID = '1cH1KUvgSt2OFTBTfzcaDOFDA4OPUEfNiKCvDtJklMwU'
 DRIVE_ROOT_ID  = '1S6o0KBtEutrcPdNAHowgrzn_lDYfFldJ'
 
@@ -74,20 +74,6 @@ MAX_VIDEOS_POR_RUN = 1  # um vídeo por execução diária (alinha com artigo do
 
 
 # === Helpers ===
-
-def ler_json(path: str, default=None):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-
-
-def salvar_json(path: str, data: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
 
 def enviar_telegram(texto: str):
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
@@ -539,9 +525,9 @@ def processar_produto(post: dict, semana: str, tmp_dir: str) -> dict:
 def main():
     print(f'[INFO] {datetime.now().isoformat()} — pipeline de vídeo iniciado')
 
-    aprovacao = ler_json(APROVACAO_FILE)
+    aprovacao = ler_estado('aprovacao_atual')
     if not aprovacao:
-        print('[ERRO] data/aprovacao_atual.json não encontrado')
+        print('[ERRO] estado "aprovacao_atual" não encontrado na planilha')
         sys.exit(1)
 
     posts = aprovacao.get('posts_criados', [])
@@ -580,7 +566,7 @@ def main():
             post['fb_video_id']     = resultado.get('facebook', '')
             post['ig_media_id']     = resultado.get('instagram', '')
             aprovacao['posts_criados'] = posts
-            salvar_json(APROVACAO_FILE, aprovacao)
+            salvar_estado('aprovacao_atual', aprovacao)
             atualizar_planilha_video(post['mlb_id'], data_hoje)
 
     # Resumo Telegram

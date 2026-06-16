@@ -1,3 +1,7 @@
+# Estado transitório do pipeline (título/MLB/slug/imagem antes da publicação) —
+# vive na aba "estado_pipeline" do Google Sheets, nunca deve ser commitado aqui
+data/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

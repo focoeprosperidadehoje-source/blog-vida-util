@@ -3,10 +3,10 @@
 atualizar_planilha.py — Blog Vida Útil
 Atualiza a planilha controle_publicacoes no Google Sheets
 com os dados dos artigos publicados na semana.
-Para cada post em data/aprovacao_atual.json:
+Para cada post no estado "aprovacao_atual" (aba estado_pipeline):
   - Se mlb_id já existe na planilha → atualiza colunas
   - Se não existe → insere nova linha
-Lê: data/aprovacao_atual.json
+Lê: estado "aprovacao_atual" (aba estado_pipeline da planilha Google Sheets)
 """
 
 import json
@@ -17,8 +17,8 @@ from datetime import datetime, timezone, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
 
-DATA_DIR        = 'data'
-APROVACAO_FILE  = f'{DATA_DIR}/aprovacao_atual.json'
+from estado_sheets import ler_estado
+
 SPREADSHEET_ID  = '1cH1KUvgSt2OFTBTfzcaDOFDA4OPUEfNiKCvDtJklMwU'
 
 BRT = timezone(timedelta(hours=-3))
@@ -44,14 +44,6 @@ SCOPES = [
     'https://spreadsheets.google.com/feeds',
     'https://www.googleapis.com/auth/drive',
 ]
-
-
-def ler_json(path: str, default=None):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
 
 
 def conectar_sheets() -> gspread.Worksheet:
@@ -98,9 +90,9 @@ def inserir_linha(ws: gspread.Worksheet, post: dict, data_hoje: str):
 
 
 def main():
-    aprovacao = ler_json(APROVACAO_FILE)
+    aprovacao = ler_estado('aprovacao_atual')
     if not aprovacao:
-        print('[ERRO] data/aprovacao_atual.json não encontrado')
+        print('[ERRO] estado "aprovacao_atual" não encontrado na planilha')
         sys.exit(1)
 
     posts = aprovacao.get('posts_criados', [])

@@ -9,8 +9,6 @@ jobs:
   sugestao:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout
@@ -22,20 +20,15 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependências
-        run: pip install requests
+        run: pip install requests gspread google-auth
 
       - name: Executar sugestão semanal
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          ML_PUBLISHER_ID:    ${{ secrets.ML_PUBLISHER_ID }}
-          ML_TRACKING_WORD:   ${{ secrets.ML_TRACKING_WORD }}
+          TELEGRAM_BOT_TOKEN:       ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:         ${{ secrets.TELEGRAM_CHAT_ID }}
+          ML_PUBLISHER_ID:          ${{ secrets.ML_PUBLISHER_ID }}
+          ML_TRACKING_WORD:         ${{ secrets.ML_TRACKING_WORD }}
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         run: python scripts/sugestao_semanal.py
-
-      - name: Salvar sugestão no repositório
-        run: |
-          git config user.name  'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add data/ultima_sugestao.json
-          git diff --staged --quiet || git commit -m "data: sugestao semanal $(date +%Y-%m-%d) [skip ci]"
-          git push
+        # Estado salvo na aba "estado_pipeline" do Google Sheets — não em data/*.json
+        # do repositório, para não expor título/MLB no histórico Git público.

@@ -6,12 +6,11 @@ cria artigo + produto WooCommerce para cada MLB aprovado →
 agenda publicação 1 por dia, seg a dom, 09h BRT.
 Repete na segunda seguinte com nova sugestão.
 
-Lê  : data/aprovacao_atual.json
-Grava: data/aprovacao_atual.json (progresso parcial + processado=True ao fim)
-       data/ultima_sugestao.json (processado=True ao fim)
+Lê  : estado "aprovacao_atual" (aba estado_pipeline da planilha Google Sheets)
+Grava: estado "aprovacao_atual" (progresso parcial + processado=True ao fim)
+       estado "ultima_sugestao" (processado=True ao fim)
 """
 
-import json
 import os
 import re
 import sys
@@ -22,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 
 import markdown
 import requests
+
+from estado_sheets import ler_estado, salvar_estado
 
 # === Credenciais ===
 GEMINI_KEYS = [
@@ -35,10 +36,6 @@ TELEGRAM_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
 TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 ML_PUBLISHER_ID  = os.environ.get('ML_PUBLISHER_ID', '65450483')
 ML_TRACKING_WORD = os.environ.get('ML_TRACKING_WORD', 'casalemaro')
-
-DATA_DIR       = 'data'
-APROVACAO_FILE = f'{DATA_DIR}/aprovacao_atual.json'
-SUGESTAO_FILE  = f'{DATA_DIR}/ultima_sugestao.json'
 
 # UTC-3 (BRT, sem horário de verão no Brasil desde 2019)
 BRT = timezone(timedelta(hours=-3))
@@ -162,20 +159,6 @@ ESTRUTURA OBRIGATÓRIA (nesta ordem exata, sem alterar os placeholders):
 
 
 # === Funções auxiliares ===
-
-def ler_json(path: str, default=None):
-    try:
-        with open(path, encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-
-
-def salvar_json(path: str, data: dict):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
 
 def slugify(texto: str) -> str:
     texto = unicodedata.normalize('NFD', texto)
@@ -451,9 +434,9 @@ def enviar_telegram(texto: str):
 def main():
     print(f'[INFO] {datetime.now().isoformat()} — geração de artigos iniciada')
 
-    aprovacao = ler_json(APROVACAO_FILE)
+    aprovacao = ler_estado('aprovacao_atual')
     if not aprovacao:
-        print('[ERRO] data/aprovacao_atual.json não encontrado')
+        print('[ERRO] estado "aprovacao_atual" não encontrado na planilha')
         sys.exit(1)
 
     if aprovacao.get('processado'):
@@ -466,7 +449,7 @@ def main():
 
     if not mlbs_pendentes:
         aprovacao['processado'] = True
-        salvar_json(APROVACAO_FILE, aprovacao)
+        salvar_estado('aprovacao_atual', aprovacao)
         sys.exit(0)
 
     # Quantidade e datas de agendamento ficam no log — produtos/MLBs não (evitar
@@ -524,17 +507,17 @@ def main():
         mlbs_processados.add(mlb_id)
         aprovacao['mlbs_processados'] = list(mlbs_processados)
         aprovacao['posts_criados']    = posts_criados
-        salvar_json(APROVACAO_FILE, aprovacao)
+        salvar_estado('aprovacao_atual', aprovacao)
 
         proxima_data += timedelta(days=1)  # próximo artigo: +1 dia (seg→dom→seg...)
 
     # Marca semana como concluída
     if mlbs_processados >= set(mlbs_aprovados):
         aprovacao['processado'] = True
-        salvar_json(APROVACAO_FILE, aprovacao)
-        sugestao = ler_json(SUGESTAO_FILE, {})
+        salvar_estado('aprovacao_atual', aprovacao)
+        sugestao = ler_estado('ultima_sugestao', {})
         sugestao['processado'] = True
-        salvar_json(SUGESTAO_FILE, sugestao)
+        salvar_estado('ultima_sugestao', sugestao)
         print('\n[OK] Todos os produtos da semana processados')
 
     # Resumo Telegram
