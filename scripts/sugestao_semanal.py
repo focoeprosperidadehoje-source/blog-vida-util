@@ -134,7 +134,14 @@ def buscar_ml(query: str) -> list:
     for tentativa in range(3):
         try:
             r = requests.post(url, headers=WP_HEADERS, json=payload, timeout=30)
-            r.raise_for_status()
+            if not r.ok:
+                # Corpo da resposta ajuda a diferenciar bloqueio de firewall/WAF
+                # (página HTML genérica) de rejeição do próprio plugin (JSON de erro)
+                corpo = r.text[:300].replace('\n', ' ')
+                print(f'[WARN] tentativa {tentativa + 1} falhou para "{query}": '
+                      f'HTTP {r.status_code} — corpo: {corpo}')
+                time.sleep(2 ** tentativa)
+                continue
             html_blob = r.json().get('data', {}).get('html', '')
             return parse_items_html(html_blob)[:LIMITE_POR_BUSCA]
         except Exception as e:
