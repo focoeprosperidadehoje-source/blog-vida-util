@@ -202,9 +202,8 @@ def main():
     mensagem = montar_mensagem(top7, data_semana)
     enviar_telegram(mensagem)
 
-    print('[OK] Top 7 enviados via Telegram:')
-    for i, item in enumerate(top7, 1):
-        print(f'  {i}. {item["id"]} score={item["_score"]:.0f} — {item["title"][:50]}')
+    # Detalhes (MLB, título, score) ficam só no Telegram — não em log público do Actions
+    print(f'[OK] Top {len(top7)} enviados via Telegram')
 
     # Salva estado para o detector de aprovação
     os.makedirs('data', exist_ok=True)

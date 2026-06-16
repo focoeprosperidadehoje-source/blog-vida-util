@@ -77,7 +77,7 @@ def atualizar_linha(ws: gspread.Worksheet, row_idx: int, post: dict, data_hoje: 
     ]
     for row, col, val in updates:
         ws.update_cell(row, col, val)
-    print(f'[OK] Linha {row_idx} atualizada (mlb={post["mlb_id"]})')
+    print(f'[OK] Linha {row_idx} atualizada (post #{post.get("post_id", "")})')
 
 
 def inserir_linha(ws: gspread.Worksheet, post: dict, data_hoje: str):
@@ -94,7 +94,7 @@ def inserir_linha(ws: gspread.Worksheet, post: dict, data_hoje: str):
     nova_linha[COL['carousel_publicado'] - 1] = 'FALSE'
     nova_linha[COL['imagens_apagadas'] - 1]  = 'FALSE'
     ws.append_row(nova_linha, value_input_option='USER_ENTERED')
-    print(f'[OK] Nova linha inserida (mlb={post["mlb_id"]})')
+    print(f'[OK] Nova linha inserida (post #{post.get("post_id", "")})')
 
 
 def main():
@@ -143,7 +143,7 @@ def main():
                 inserir_linha(ws, post, data_hoje)
             ok += 1
         except Exception as e:
-            print(f'[ERRO] Sheets para {mlb_id}: {e}')
+            print(f'[ERRO] Sheets para post #{post.get("post_id", "")}: {e}')
 
     print(f'\n[OK] {ok}/{len(posts)} linhas atualizadas na planilha')
 

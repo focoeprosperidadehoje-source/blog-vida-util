@@ -219,10 +219,10 @@ def processar_post(post: dict) -> bool:
     imagem_url = post.get('imagem_url', '')
     slug      = post.get('slug', slugify(titulo))
 
-    print(f'\n[INFO] ── Capa para Post {post_id} ({mlb_id}) ──')
+    print(f'\n[INFO] ── Capa para Post #{post_id} ──')
 
     if not imagem_url:
-        print(f'[WARN] sem imagem_url para {mlb_id} — pulando')
+        print(f'[WARN] sem imagem_url para Post #{post_id} — pulando')
         return False
 
     # 1. Remove fundo

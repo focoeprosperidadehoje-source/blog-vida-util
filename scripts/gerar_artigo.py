@@ -430,7 +430,7 @@ def criar_produto_wc(produto: dict) -> int | None:
         return None
 
     wc_id = r.json().get('id')
-    print(f'[OK] Produto WooCommerce ID {wc_id} criado — {titulo[:50]}')
+    print(f'[OK] Produto WooCommerce ID {wc_id} criado')
     return wc_id
 
 
@@ -469,7 +469,9 @@ def main():
         salvar_json(APROVACAO_FILE, aprovacao)
         sys.exit(0)
 
-    print(f'[INFO] {len(mlbs_pendentes)} produtos para processar: {mlbs_pendentes}')
+    # Quantidade e datas de agendamento ficam no log — produtos/MLBs não (evitar
+    # expor no Actions público, agora que o repo é público, a fila antes da publicação)
+    print(f'[INFO] {len(mlbs_pendentes)} produtos para processar')
 
     proxima_data  = calcular_proxima_data()
     data_brt_ini  = proxima_data.astimezone(BRT).strftime('%d/%m')
@@ -479,20 +481,18 @@ def main():
     # Inicializa da sessão anterior (tolerante a reexecuções parciais)
     posts_criados = aprovacao.get('posts_criados', [])
 
-    for mlb_id in mlbs_pendentes:
-        print(f'\n[INFO] ── {mlb_id} ──')
+    for idx, mlb_id in enumerate(mlbs_pendentes, 1):
+        print(f'\n[INFO] ── produto {idx}/{len(mlbs_pendentes)} ──')
 
         produto = buscar_produto_ml(mlb_id)
         if not produto:
-            print(f'[WARN] ML API falhou para {mlb_id} — pulando')
+            print(f'[WARN] ML API falhou para o produto {idx} — pulando')
             continue
-
-        print(f'[INFO] {produto["title"]} | R$ {formatar_preco(produto["price"])}')
 
         # Gera artigo com Gemini
         artigo_md = gerar_artigo_gemini(produto)
         if not artigo_md:
-            print(f'[ERRO] Gemini falhou para {mlb_id} — pulando')
+            print(f'[ERRO] Gemini falhou para o produto {idx} — pulando')
             continue
 
         palavras = len(re.sub(r'\[.*?\]|\<[^>]+>', '', artigo_md).split())
@@ -503,7 +503,7 @@ def main():
         # Publica artigo no WordPress
         post_id = publicar_wp(produto, conteudo_wp, proxima_data)
         if not post_id:
-            print(f'[ERRO] WP falhou para {mlb_id} — pulando')
+            print(f'[ERRO] WP falhou para o produto {idx} — pulando')
             continue
 
         # Cria produto na loja WooCommerce
