@@ -9,6 +9,7 @@ Para cada artigo sem capa no estado "aprovacao_atual" (aba estado_pipeline):
 Grava: capa_gerada=True por post no estado "aprovacao_atual"
 """
 
+import hashlib
 import io
 import os
 import re
@@ -100,6 +101,27 @@ def pexels_keyword(titulo: str) -> str:
     return PEXELS_DEFAULT
 
 
+# Bug confirmado em 17/06/2026: posts 816, 822, 828, 832 e 835 (todos câmeras,
+# todos com a mesma keyword PEXELS_MAP "câmera") sempre chamavam
+# buscar_fundo_pexels(keyword) sem índice — ou seja, sempre a 1ª foto do
+# Pexels para a keyword. Resultado: 5 capas publicadas em sequência com fundo
+# idêntico (confirmado via hash MD5 do canto superior esquerdo de cada capa).
+# Fix permanente: cada post sorteia um índice de foto (0-7) derivado de forma
+# determinística do próprio MLB ID, então produtos diferentes da mesma
+# categoria tendem a cair em fotos de fundo diferentes. Não elimina 100% a
+# chance de colisão (8 baldes para N produtos = aniversário-paradoxo), mas é
+# uma melhoria grande sobre "sempre a mesma foto" e é determinístico (não
+# depende de estado extra) — se ainda colidir, é tratável manualmente via
+# fix_capa_manual.yml (modo trocar_fundo, pexels_index diferente).
+PEXELS_INDEX_BUCKETS = 8
+
+
+def pexels_index_for(mlb_id: str) -> int:
+    if not mlb_id:
+        return 0
+    return int(hashlib.md5(mlb_id.encode()).hexdigest(), 16) % PEXELS_INDEX_BUCKETS
+
+
 def remover_fundo(image_url: str) -> bytes | None:
     """Chama remove.bg com URL da imagem ML → retorna PNG transparente."""
     try:
@@ -117,13 +139,18 @@ def remover_fundo(image_url: str) -> bytes | None:
     return None
 
 
-def buscar_fundo_pexels(keyword: str) -> bytes | None:
-    """Busca foto landscape no Pexels e retorna bytes da imagem."""
+def buscar_fundo_pexels(keyword: str, index: int = 0) -> bytes | None:
+    """Busca foto landscape no Pexels e retorna bytes da imagem.
+
+    `index` permite pular o primeiro resultado (sempre o mesmo para uma
+    keyword fixa) quando dois artigos do mesmo nicho ficam com fundos
+    idênticos por usarem a mesma keyword do PEXELS_MAP.
+    """
     try:
         r = requests.get(
             'https://api.pexels.com/v1/search',
             headers={'Authorization': PEXELS_KEY},
-            params={'query': keyword, 'per_page': 5, 'orientation': 'landscape'},
+            params={'query': keyword, 'per_page': max(5, index + 1), 'orientation': 'landscape'},
             timeout=15,
         )
         r.raise_for_status()
@@ -131,7 +158,8 @@ def buscar_fundo_pexels(keyword: str) -> bytes | None:
         if not fotos:
             print(f'[WARN] Pexels: nenhuma foto para "{keyword}"')
             return None
-        foto_url = fotos[0]['src']['large2x']
+        foto = fotos[index] if index < len(fotos) else fotos[0]
+        foto_url = foto['src']['large2x']
         img_r = requests.get(foto_url, timeout=20)
         img_r.raise_for_status()
         return img_r.content
@@ -231,12 +259,14 @@ def processar_post(post: dict) -> tuple[bool, str]:
     if not produto_png:
         return False, 'falha no remove.bg (ver log)'
 
-    # 2. Fundo Pexels
+    # 2. Fundo Pexels — índice derivado do MLB ID para evitar que produtos da
+    # mesma categoria sempre puxem a mesma 1ª foto (ver pexels_index_for)
     keyword = pexels_keyword(titulo)
-    print(f'[INFO] Pexels: "{keyword}"')
-    fundo_bytes = buscar_fundo_pexels(keyword)
+    index   = pexels_index_for(mlb_id)
+    print(f'[INFO] Pexels: "{keyword}" (índice {index})')
+    fundo_bytes = buscar_fundo_pexels(keyword, index=index)
     if not fundo_bytes:
-        return False, f'falha no Pexels para "{keyword}" (ver log)'
+        return False, f'falha no Pexels para "{keyword}" (índice {index})'
 
     # 3. Composição
     print(f'[INFO] Compondo 1200×628px...')

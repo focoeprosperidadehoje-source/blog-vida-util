@@ -3,15 +3,32 @@ name: Fix Capa Manual
 on:
   workflow_dispatch:
     inputs:
+      modo:
+        description: 'capa_completa (post sem capa, usa imagem_url do produto) ou trocar_fundo (só troca o fundo, mantém produto)'
+        required: false
+        default: 'capa_completa'
+        type: choice
+        options:
+          - capa_completa
+          - trocar_fundo
       post_id:
-        description: 'ID do post WordPress sem capa'
+        description: 'ID do post WordPress'
         required: true
       titulo:
         description: 'Título do produto/post (usado no alt text e keyword Pexels)'
         required: true
       imagem_url:
-        description: 'URL da imagem do produto (ex: mlstatic.com)'
-        required: true
+        description: 'URL da imagem do produto no ML (obrigatório no modo capa_completa)'
+        required: false
+        default: ''
+      capa_atual_url:
+        description: 'URL da capa atual do post (obrigatório no modo trocar_fundo)'
+        required: false
+        default: ''
+      pexels_index:
+        description: 'Índice da foto Pexels a usar no modo trocar_fundo (0=primeira/já usada, 1=segunda...)'
+        required: false
+        default: '1'
       slug:
         description: 'Slug do post (opcional — gerado do título se vazio)'
         required: false
@@ -48,9 +65,12 @@ jobs:
           TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          CAPA_MODO:              ${{ inputs.modo }}
           CAPA_POST_ID:           ${{ inputs.post_id }}
           CAPA_TITULO:            ${{ inputs.titulo }}
           CAPA_IMAGEM_URL:        ${{ inputs.imagem_url }}
+          CAPA_ATUAL_URL:         ${{ inputs.capa_atual_url }}
+          CAPA_PEXELS_INDEX:      ${{ inputs.pexels_index }}
           CAPA_SLUG:              ${{ inputs.slug }}
           CAPA_MLB_ID:            ${{ inputs.mlb_id }}
         run: python gerar_capa_manual.py

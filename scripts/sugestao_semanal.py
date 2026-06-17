@@ -91,6 +91,13 @@ MLB_PUBLICADOS = {
     'MLB29503401', 'MLB43918941', 'MLB54284933', 'MLB22696064',
     'MLB34967575', 'MLB24638981', 'MLB51474206', 'MLB6149192854',
     'MLB53818381',
+    # MLB46314703: causou duplicidade (posts 822 e 832 com o mesmo produto,
+    # ver CLAUDE.md 17/06/2026) — post 822 nunca tinha sido registrado aqui
+    # por ter entrado no fluxo fora do estado rastreado pelo pipeline.
+    'MLB46314703',
+    # MLB61815112: produto que substituiu o duplicado no post 822 (Tp-Link
+    # Tapo C206 360° — ver trocar_produto.yml, 17/06/2026).
+    'MLB61815112',
 }
 
 

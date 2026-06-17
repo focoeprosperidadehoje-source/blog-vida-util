@@ -1,0 +1,63 @@
+name: Trocar Produto de Post Existente
+
+on:
+  workflow_dispatch:
+    inputs:
+      post_id:
+        description: 'ID do post WordPress a atualizar'
+        required: true
+      mlb_id:
+        description: 'Novo MLB ID (deve ser um produto ainda não publicado no blog)'
+        required: true
+      titulo:
+        description: 'Novo título do produto'
+        required: true
+      preco:
+        description: 'Preço atual (ex.: 289.90)'
+        required: true
+      imagem_url:
+        description: 'URL da imagem do produto no Mercado Livre'
+        required: true
+      pexels_index:
+        description: 'Índice da foto Pexels a forçar (opcional — vazio = automático pelo MLB ID)'
+        required: false
+        default: ''
+
+jobs:
+  trocar-produto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests markdown Pillow gspread google-auth
+
+      - name: Trocar produto do post
+        working-directory: scripts
+        env:
+          GEMINI_API_KEY_PRIMARY:  ${{ secrets.GEMINI_API_KEY_PRIMARY }}
+          GEMINI_API_KEY_BACKUP:   ${{ secrets.GEMINI_API_KEY_BACKUP }}
+          REMOVE_BG_API_KEY:       ${{ secrets.REMOVE_BG_API_KEY }}
+          PEXELS_API_KEY:          ${{ secrets.PEXELS_API_KEY }}
+          WORDPRESS_URL:           ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:          ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD:  ${{ secrets.WORDPRESS_APP_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
+          ML_PUBLISHER_ID:         ${{ secrets.ML_PUBLISHER_ID }}
+          ML_TRACKING_WORD:        ${{ secrets.ML_TRACKING_WORD }}
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          TROCA_POST_ID:           ${{ inputs.post_id }}
+          TROCA_MLB_ID:            ${{ inputs.mlb_id }}
+          TROCA_TITULO:            ${{ inputs.titulo }}
+          TROCA_PRECO:             ${{ inputs.preco }}
+          TROCA_IMAGEM_URL:        ${{ inputs.imagem_url }}
+          TROCA_PEXELS_INDEX:      ${{ inputs.pexels_index }}
+        run: python trocar_produto.py
