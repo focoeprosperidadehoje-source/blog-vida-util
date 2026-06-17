@@ -26,6 +26,8 @@ PEXELS_KEY       = os.environ['PEXELS_API_KEY']
 WP_URL           = os.environ['WORDPRESS_URL'].rstrip('/')
 WP_USER          = os.environ['WORDPRESS_USER']
 WP_PASS          = os.environ['WORDPRESS_APP_PASSWORD']
+TELEGRAM_TOKEN   = os.environ['TELEGRAM_BOT_TOKEN']
+TELEGRAM_CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 
 WP_AUTH    = b64encode(f'{WP_USER}:{WP_PASS}'.encode()).decode()
 WP_AUTH_H  = {'Authorization': f'Basic {WP_AUTH}'}   # sem Content-Type (multipart usa boundary)
@@ -66,6 +68,19 @@ PEXELS_MAP = {
     'zigbee':      'modern smart home interior',
 }
 PEXELS_DEFAULT = 'modern smart home interior living room'
+
+
+def enviar_telegram(texto: str):
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    try:
+        requests.post(url, json={
+            'chat_id':                  TELEGRAM_CHAT_ID,
+            'text':                     texto,
+            'parse_mode':               'HTML',
+            'disable_web_page_preview': True,
+        }, timeout=15)
+    except Exception as e:
+        print(f'[WARN] Telegram: {e}')
 
 
 def slugify(texto: str) -> str:
@@ -195,8 +210,8 @@ def definir_featured_media(post_id: int, media_id: int) -> bool:
     return False
 
 
-def processar_post(post: dict) -> bool:
-    """Executa pipeline completo de capa para um post. Retorna True se bem-sucedido."""
+def processar_post(post: dict) -> tuple[bool, str]:
+    """Executa pipeline completo de capa para um post. Retorna (sucesso, erro)."""
     mlb_id    = post['mlb_id']
     post_id   = post['post_id']
     titulo    = post['titulo']
@@ -206,21 +221,22 @@ def processar_post(post: dict) -> bool:
     print(f'\n[INFO] ── Capa para Post #{post_id} ──')
 
     if not imagem_url:
-        print(f'[WARN] sem imagem_url para Post #{post_id} — pulando')
-        return False
+        erro = 'sem imagem_url salva no estado'
+        print(f'[WARN] {erro} — Post #{post_id} — pulando')
+        return False, erro
 
     # 1. Remove fundo
     print(f'[INFO] remove.bg: {imagem_url[:60]}...')
     produto_png = remover_fundo(imagem_url)
     if not produto_png:
-        return False
+        return False, 'falha no remove.bg (ver log)'
 
     # 2. Fundo Pexels
     keyword = pexels_keyword(titulo)
     print(f'[INFO] Pexels: "{keyword}"')
     fundo_bytes = buscar_fundo_pexels(keyword)
     if not fundo_bytes:
-        return False
+        return False, f'falha no Pexels para "{keyword}" (ver log)'
 
     # 3. Composição
     print(f'[INFO] Compondo 1200×628px...')
@@ -229,10 +245,12 @@ def processar_post(post: dict) -> bool:
     # 4. Upload WP
     media_id = upload_wp_media(capa_bytes, slug, titulo)
     if not media_id:
-        return False
+        return False, 'falha no upload WP media (ver log)'
 
     # 5. Define como capa do post
-    return definir_featured_media(post_id, media_id)
+    if not definir_featured_media(post_id, media_id):
+        return False, 'falha ao definir featured_media (ver log)'
+    return True, ''
 
 
 def main():
@@ -250,11 +268,18 @@ def main():
 
     print(f'[INFO] {len(pendentes)} capas a gerar')
     ok = 0
+    resultados = []
 
     for i, post in enumerate(posts):
         if post.get('capa_gerada'):
             continue
-        sucesso = processar_post(post)
+        sucesso, erro = processar_post(post)
+        resultados.append({
+            'post_id': post.get('post_id'),
+            'titulo':  post.get('titulo', ''),
+            'sucesso': sucesso,
+            'erro':    erro,
+        })
         if sucesso:
             post['capa_gerada'] = True
             ok += 1
@@ -263,6 +288,21 @@ def main():
         salvar_estado('aprovacao_atual', aprovacao)
 
     print(f'\n[OK] {ok}/{len(pendentes)} capas geradas com sucesso')
+
+    # Resumo Telegram — sempre enviado, mesmo se tudo falhar (bug anterior:
+    # falha silenciosa, sem nenhum aviso ao operador)
+    linhas = [f'<b>🖼️ Capas Vida Útil</b>\n']
+    for r in resultados:
+        status = '✅' if r['sucesso'] else '❌'
+        linha = f'{status} <b>Post #{r["post_id"]}</b> — {r["titulo"][:45]}'
+        if not r['sucesso']:
+            linha += f'\n  ⛔ {r["erro"]}'
+        linhas.append(linha)
+    linhas.append(f'\n<i>{ok}/{len(resultados)} capa(s) geradas com sucesso</i>')
+    enviar_telegram('\n'.join(linhas))
+
+    if ok == 0:
+        sys.exit(1)
 
 
 if __name__ == '__main__':

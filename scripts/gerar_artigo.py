@@ -56,7 +56,13 @@ WP_HEADERS = {
     'Content-Type':  'application/json',
 }
 
-# Mapeamento título → categoria WP (blog e WooCommerce usam os mesmos IDs)
+# Mapeamento título → categoria. IMPORTANTE: blog (taxonomia "category") e
+# WooCommerce (taxonomia "product_cat") são taxonomias DIFERENTES com IDs
+# próprios — reaproveitar os IDs de uma para a outra resulta em termo
+# inexistente e o post cai em "Uncategorized" silenciosamente (bug confirmado
+# em 17/06/2026: WP_CATEGORIA_IDS antigo usava os IDs do WooCommerce também
+# no payload de wp/v2/posts). IDs reais do blog confirmados via
+# GET /wp-json/wp/v2/categories.
 CATEGORIA_KEYWORDS = {
     'seguranca': ['câmera', 'camera', 'sensor', 'fechadura', 'alarme', 'vigilância', 'vigilancia'],
     'iluminacao': ['lâmpada', 'lampada', 'led', 'dimmer', 'iluminação', 'iluminacao'],
@@ -64,8 +70,18 @@ CATEGORIA_KEYWORDS = {
     'eletro':     ['robô', 'robo', 'aspirador', 'airfryer', 'air fryer', 'smartband',
                    'smart band', 'geladeira', 'fire tv', 'roku', 'comedouro', 'tv stick'],
 }
-# IDs de categorias no WP (valem para posts E para WooCommerce)
-WP_CATEGORIA_IDS = {
+# Categorias do BLOG (taxonomia "category") — todo artigo entra também em
+# "Reviews" (23), além da categoria de nicho detectada pelo título.
+WP_POST_CATEGORIA_REVIEWS = 23  # Reviews
+WP_POST_CATEGORIA_IDS = {
+    'seguranca':  25,  # Segurança
+    'iluminacao': 26,  # Iluminação Inteligente
+    'audio':      27,  # Assistentes Virtuais
+    'eletro':     28,  # Eletrodomésticos Smart
+    'default':    24,  # Automação Residencial
+}
+# Categorias do WooCommerce (taxonomia "product_cat") — ver CLAUDE.md
+WC_CATEGORIA_IDS = {
     'seguranca': 20,   # Segurança
     'iluminacao': 19,  # Iluminação Inteligente
     'audio':      21,  # Áudio e Assistentes
@@ -184,12 +200,24 @@ def slugify(texto: str) -> str:
     return texto[:90]
 
 
-def detectar_categoria(titulo: str) -> int:
+def detectar_categoria_key(titulo: str) -> str:
     titulo_lower = titulo.lower()
     for cat, keywords in CATEGORIA_KEYWORDS.items():
         if any(kw in titulo_lower for kw in keywords):
-            return WP_CATEGORIA_IDS[cat]
-    return WP_CATEGORIA_IDS['default']
+            return cat
+    return 'default'
+
+
+def categorias_post_wp(titulo: str) -> list[int]:
+    """Categorias do blog: Reviews + categoria de nicho."""
+    cat_key = detectar_categoria_key(titulo)
+    return [WP_POST_CATEGORIA_REVIEWS, WP_POST_CATEGORIA_IDS[cat_key]]
+
+
+def categoria_wc(titulo: str) -> int:
+    """Categoria do produto na loja WooCommerce."""
+    cat_key = detectar_categoria_key(titulo)
+    return WC_CATEGORIA_IDS[cat_key]
 
 
 def formatar_preco(v) -> str:
@@ -348,10 +376,10 @@ def calcular_proxima_data() -> datetime:
 
 
 def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
-    titulo    = produto['title']
-    slug      = slugify(titulo) + '-vale-a-pena'
-    categoria = detectar_categoria(titulo)
-    date_str  = data_pub.strftime('%Y-%m-%dT%H:%M:%S')
+    titulo     = produto['title']
+    slug       = slugify(titulo) + '-vale-a-pena'
+    categorias = categorias_post_wp(titulo)
+    date_str   = data_pub.strftime('%Y-%m-%dT%H:%M:%S')
 
     payload = {
         'title':          titulo,
@@ -359,16 +387,27 @@ def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
         'content':        conteudo,
         'status':         'future',
         'date_gmt':       date_str,
-        'categories':     [categoria],
+        'categories':     categorias,
         'comment_status': 'open',
         'meta':           {'_kad_post_feature_position': 'right center'},
     }
-    r = requests.post(
-        f'{WP_URL}/wp-json/wp/v2/posts',
-        headers=WP_HEADERS, json=payload, timeout=30,
-    )
-    if not r.ok:
-        print(f'[ERRO] WP post {r.status_code}: {r.text[:300]}')
+    r = None
+    for tentativa in range(3):
+        try:
+            r = requests.post(
+                f'{WP_URL}/wp-json/wp/v2/posts',
+                headers=WP_HEADERS, json=payload, timeout=30,
+            )
+            if r.ok:
+                break
+            print(f'[WARN] WP post tentativa {tentativa + 1} falhou: '
+                  f'HTTP {r.status_code} — {r.text[:300]}')
+        except Exception as e:
+            print(f'[WARN] WP post tentativa {tentativa + 1} falhou: {e}')
+            r = None
+        time.sleep(2 ** tentativa)
+
+    if r is None or not r.ok:
         return None
 
     post_id = r.json().get('id')
@@ -392,7 +431,7 @@ def criar_produto_wc(produto: dict, descricao: str) -> int | None:
     "thin content" do AdSense.
     """
     titulo    = produto['title']
-    categoria = detectar_categoria(titulo)
+    categoria = categoria_wc(titulo)
     preco_str = str(produto['price'])
     link_ml   = link_afiliado_ml(produto['id'])
 
@@ -416,12 +455,23 @@ def criar_produto_wc(produto: dict, descricao: str) -> int | None:
     if produto.get('imagem_url'):
         payload['images'] = [{'src': produto['imagem_url'], 'alt': titulo}]
 
-    r = requests.post(
-        f'{WP_URL}/wp-json/wc/v3/products',
-        headers=WP_HEADERS, json=payload, timeout=30,
-    )
-    if not r.ok:
-        print(f'[ERRO] WC produto {r.status_code}: {r.text[:300]}')
+    r = None
+    for tentativa in range(3):
+        try:
+            r = requests.post(
+                f'{WP_URL}/wp-json/wc/v3/products',
+                headers=WP_HEADERS, json=payload, timeout=30,
+            )
+            if r.ok:
+                break
+            print(f'[WARN] WC produto tentativa {tentativa + 1} falhou: '
+                  f'HTTP {r.status_code} — {r.text[:300]}')
+        except Exception as e:
+            print(f'[WARN] WC produto tentativa {tentativa + 1} falhou: {e}')
+            r = None
+        time.sleep(2 ** tentativa)
+
+    if r is None or not r.ok:
         return None
 
     wc_id = r.json().get('id')
