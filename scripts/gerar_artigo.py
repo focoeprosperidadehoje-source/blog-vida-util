@@ -375,6 +375,46 @@ def calcular_proxima_data() -> datetime:
     return datetime(proxima.year, proxima.month, proxima.day, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def construir_datas_publicacao(qtd: int) -> list[datetime]:
+    """
+    Lista de `qtd` datas de publicação para os produtos pendentes.
+
+    Por padrão (uso normal semanal): 1/dia a partir da próxima data livre,
+    via calcular_proxima_data() (sem colidir com posts 'future' já agendados).
+
+    Catch-up manual: a env var DATAS_OVERRIDE (datas ISO 'YYYY-MM-DD'
+    separadas por vírgula) permite forçar datas específicas para os primeiros
+    N produtos pendentes — usado para publicar de imediato artigos que
+    deveriam ter entrado no ar em dias já passados (ex.: WP corrige sozinho
+    status 'future' com data passada para 'publish' — ver wp_insert_post).
+    Os produtos restantes (se houver mais pendentes que datas em
+    DATAS_OVERRIDE) seguem o agendamento automático normal, continuando a
+    partir da próxima data livre real (sem colidir com o que já está agendado).
+    """
+    datas: list[datetime] = []
+    override_raw = os.environ.get('DATAS_OVERRIDE', '').strip()
+    if override_raw:
+        for d in override_raw.split(','):
+            d = d.strip()
+            if not d:
+                continue
+            dt = datetime.strptime(d, '%Y-%m-%d').replace(
+                hour=12, minute=0, second=0, tzinfo=timezone.utc
+            )
+            datas.append(dt)
+
+    if len(datas) < qtd:
+        proxima = calcular_proxima_data()
+        datas_dia = {d.date() for d in datas}
+        while proxima.date() in datas_dia:
+            proxima += timedelta(days=1)
+        while len(datas) < qtd:
+            datas.append(proxima)
+            proxima += timedelta(days=1)
+
+    return datas[:qtd]
+
+
 def publicar_wp(produto: dict, conteudo: str, data_pub: datetime) -> int | None:
     titulo     = produto['title']
     slug       = slugify(titulo) + '-vale-a-pena'
@@ -519,10 +559,11 @@ def main():
     # expor no Actions público, agora que o repo é público, a fila antes da publicação)
     print(f'[INFO] {len(mlbs_pendentes)} produtos para processar')
 
-    proxima_data  = calcular_proxima_data()
-    data_brt_ini  = proxima_data.astimezone(BRT).strftime('%d/%m')
-    data_brt_fim  = (proxima_data + timedelta(days=len(mlbs_pendentes)-1)).astimezone(BRT).strftime('%d/%m')
-    print(f'[INFO] Agendamento: {data_brt_ini} a {data_brt_fim} (09h BRT cada)')
+    datas_pub     = construir_datas_publicacao(len(mlbs_pendentes))
+    data_brt_ini  = datas_pub[0].astimezone(BRT).strftime('%d/%m')
+    data_brt_fim  = datas_pub[-1].astimezone(BRT).strftime('%d/%m')
+    print(f'[INFO] Agendamento: {data_brt_ini} a {data_brt_fim} (09h BRT/12h UTC cada — '
+          f'datas no passado publicam imediatamente, correção automática do WP core)')
 
     # Inicializa da sessão anterior (tolerante a reexecuções parciais)
     posts_criados = aprovacao.get('posts_criados', [])
@@ -547,9 +588,10 @@ def main():
 
         intro_desc  = extrair_intro(artigo_md)
         conteudo_wp = montar_conteudo_wp(artigo_md, mlb_id)
+        data_pub    = datas_pub[idx - 1]
 
         # Publica artigo no WordPress
-        post_id = publicar_wp(produto, conteudo_wp, proxima_data)
+        post_id = publicar_wp(produto, conteudo_wp, data_pub)
         if not post_id:
             print(f'[ERRO] WP falhou para o produto {idx} — pulando')
             continue
@@ -565,7 +607,7 @@ def main():
             'imagem_url':  produto['imagem_url'],
             'slug':        slugify(produto['title']) + '-vale-a-pena',
             'capa_gerada': False,
-            'data_pub':    proxima_data.isoformat(),
+            'data_pub':    data_pub.isoformat(),
         })
 
         # Salva progresso parcial — gerar_capa.py e atualizar_planilha.py leem posts_criados daqui
@@ -573,8 +615,6 @@ def main():
         aprovacao['mlbs_processados'] = list(mlbs_processados)
         aprovacao['posts_criados']    = posts_criados
         salvar_estado('aprovacao_atual', aprovacao)
-
-        proxima_data += timedelta(days=1)  # próximo artigo: +1 dia (seg→dom→seg...)
 
     # Marca semana como concluída
     if mlbs_processados >= set(mlbs_aprovados):
