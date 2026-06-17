@@ -35,7 +35,7 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependências
-        run: pip install requests Pillow
+        run: pip install requests Pillow gspread google-auth
 
       - name: Gerar e aplicar capa
         working-directory: scripts
@@ -47,6 +47,7 @@ jobs:
           WORDPRESS_APP_PASSWORD: ${{ secrets.WORDPRESS_APP_PASSWORD }}
           TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
           CAPA_POST_ID:           ${{ inputs.post_id }}
           CAPA_TITULO:            ${{ inputs.titulo }}
           CAPA_IMAGEM_URL:        ${{ inputs.imagem_url }}
