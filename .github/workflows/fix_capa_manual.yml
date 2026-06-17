@@ -1,0 +1,55 @@
+name: Fix Capa Manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      post_id:
+        description: 'ID do post WordPress sem capa'
+        required: true
+      titulo:
+        description: 'Título do produto/post (usado no alt text e keyword Pexels)'
+        required: true
+      imagem_url:
+        description: 'URL da imagem do produto (ex: mlstatic.com)'
+        required: true
+      slug:
+        description: 'Slug do post (opcional — gerado do título se vazio)'
+        required: false
+        default: ''
+      mlb_id:
+        description: 'MLB ID (opcional, apenas informativo)'
+        required: false
+        default: ''
+
+jobs:
+  fix-capa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências
+        run: pip install requests Pillow
+
+      - name: Gerar e aplicar capa
+        working-directory: scripts
+        env:
+          REMOVE_BG_API_KEY:      ${{ secrets.REMOVE_BG_API_KEY }}
+          PEXELS_API_KEY:         ${{ secrets.PEXELS_API_KEY }}
+          WORDPRESS_URL:          ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:         ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD: ${{ secrets.WORDPRESS_APP_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
+          CAPA_POST_ID:           ${{ inputs.post_id }}
+          CAPA_TITULO:            ${{ inputs.titulo }}
+          CAPA_IMAGEM_URL:        ${{ inputs.imagem_url }}
+          CAPA_SLUG:              ${{ inputs.slug }}
+          CAPA_MLB_ID:            ${{ inputs.mlb_id }}
+        run: python gerar_capa_manual.py
