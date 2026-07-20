@@ -2,10 +2,8 @@ name: Publicar Artigos Aprovados
 
 on:
   schedule:
-    # Segunda 08h30 BRT (11h30 UTC) — catch prioritário para aprovações de domingo à noite
-    - cron: '30 11 * * 1'
-    # Seg-Sex: 09h, 12h, 15h, 17h BRT (12h, 15h, 18h, 20h UTC) — polling regular
-    - cron: '0 12,15,18,20 * * 1-5'
+    # Seg-Sex 09h BRT (12h UTC) — 1x/dia, reduzido de 5x/dia (20/07/2026)
+    - cron: '0 12 * * 1-5'
   workflow_dispatch:  # disparo manual para testes ou catch-up
     inputs:
       forcar:
@@ -21,6 +19,8 @@ jobs:
   verificar-e-publicar:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -37,57 +37,47 @@ jobs:
       - name: Detectar aprovação no Telegram
         id: detectar
         env:
-          TELEGRAM_BOT_TOKEN:       ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:         ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scripts/detectar_aprovacao.py
         # exit 0 = aprovado | exit 1 = pendente | exit 2 = sem sugestão
         continue-on-error: true
 
       - name: Gerar e publicar artigos + produtos WooCommerce
-        if: steps.detectar.outcome == 'success' || github.event.inputs.forcar == 'true'
+        if: steps.detectar.outcome == 'success'
         env:
-          GEMINI_API_KEY_PRIMARY:  ${{ secrets.GEMINI_API_KEY_PRIMARY }}
-          GEMINI_API_KEY_BACKUP:   ${{ secrets.GEMINI_API_KEY_BACKUP }}
-          WORDPRESS_URL:           ${{ secrets.WORDPRESS_URL }}
-          WORDPRESS_USER:          ${{ secrets.WORDPRESS_USER }}
-          WORDPRESS_APP_PASSWORD:  ${{ secrets.WORDPRESS_APP_PASSWORD }}
-          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
-          ML_PUBLISHER_ID:         ${{ secrets.ML_PUBLISHER_ID }}
-          ML_TRACKING_WORD:        ${{ secrets.ML_TRACKING_WORD }}
-          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
-          DATAS_OVERRIDE:          ${{ github.event.inputs.datas_override }}
+          GEMINI_API_KEY_PRIMARY: ${{ secrets.GEMINI_API_KEY_PRIMARY }}
+          GEMINI_API_KEY_BACKUP:  ${{ secrets.GEMINI_API_KEY_BACKUP }}
+          WORDPRESS_URL:          ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:         ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD: ${{ secrets.WORDPRESS_APP_PASSWORD }}
+          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
+          ML_PUBLISHER_ID:        ${{ secrets.ML_PUBLISHER_ID }}
+          ML_TRACKING_WORD:       ${{ secrets.ML_TRACKING_WORD }}
         run: python scripts/gerar_artigo.py
 
       - name: Gerar capas (remove.bg + Pexels + Pillow)
-        if: steps.detectar.outcome == 'success' || github.event.inputs.forcar == 'true'
+        if: steps.detectar.outcome == 'success'
         env:
-          REMOVE_BG_API_KEY:       ${{ secrets.REMOVE_BG_API_KEY }}
-          PEXELS_API_KEY:          ${{ secrets.PEXELS_API_KEY }}
-          WORDPRESS_URL:           ${{ secrets.WORDPRESS_URL }}
-          WORDPRESS_USER:          ${{ secrets.WORDPRESS_USER }}
-          WORDPRESS_APP_PASSWORD:  ${{ secrets.WORDPRESS_APP_PASSWORD }}
-          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+          REMOVE_BG_API_KEY:      ${{ secrets.REMOVE_BG_API_KEY }}
+          PEXELS_API_KEY:         ${{ secrets.PEXELS_API_KEY }}
+          WORDPRESS_URL:          ${{ secrets.WORDPRESS_URL }}
+          WORDPRESS_USER:         ${{ secrets.WORDPRESS_USER }}
+          WORDPRESS_APP_PASSWORD: ${{ secrets.WORDPRESS_APP_PASSWORD }}
         run: python scripts/gerar_capa.py
 
       - name: Atualizar planilha controle_publicacoes
-        if: steps.detectar.outcome == 'success' || github.event.inputs.forcar == 'true'
+        if: steps.detectar.outcome == 'success'
         env:
           GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
         run: python scripts/atualizar_planilha.py
-        # Todo o estado transitório (sugestão, aprovação, posts_criados) já fica na
-        # aba "estado_pipeline" do Google Sheets — não há mais data/ para commitar.
 
-      - name: Verificar posts publicados
-        if: steps.detectar.outcome == 'success' || github.event.inputs.forcar == 'true'
-        env:
-          WORDPRESS_URL:           ${{ secrets.WORDPRESS_URL }}
-          WORDPRESS_USER:          ${{ secrets.WORDPRESS_USER }}
-          WORDPRESS_APP_PASSWORD:  ${{ secrets.WORDPRESS_APP_PASSWORD }}
-          TELEGRAM_BOT_TOKEN:      ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:        ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_DRIVE_CREDENTIALS: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
-        run: python scripts/verificar_post.py
+      - name: Salvar estado no repositório
+        if: always()
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "data: atualiza estado $(date +%Y-%m-%dT%H:%M) [skip ci]"
+          git push || true
