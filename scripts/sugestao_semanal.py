@@ -53,6 +53,8 @@ ITEM_BLOCK_RE = re.compile(
 PRICE_RE  = re.compile(r'item-result-price">\s*R\$\s*([\d.,]+)')
 RATING_RE = re.compile(r'item-result-rating-label">\s*([\d.,]+)\s*<span>\s*\((\d+)\s*reviews?\)', re.S)
 
+MLB_RE_CONTENT = re.compile(r'data-asin="(MLB\d+)"')
+
 LIMITE_POR_BUSCA = 25  # trim por busca, mesmo padrão do limite anterior da API ML
 
 # Queries cobrindo todo o nicho Casa Inteligente
@@ -80,7 +82,8 @@ PRECO_MAX = 2500.0
 # campo, manter VENDAS_MIN=0 e usar posição + rating/review_count como proxy.
 VENDAS_MIN = 0
 
-# MLBs já publicados no blog — atualizar a cada novo artigo publicado
+# MLBs já publicados no blog — baseline histórico. Em runtime, main() expande
+# este set dinamicamente consultando o WordPress (buscar_mlbs_publicados_no_wp).
 MLB_PUBLICADOS = {
     'MLB63436648', 'MLB66838326', 'MLB67656602', 'MLB27618585',
     'MLB30020878', 'MLB47414628', 'MLB65590853', 'MLB54067306',
@@ -100,6 +103,49 @@ MLB_PUBLICADOS = {
     'MLB61815112',
 }
 
+# Palavras-chave que excluem produto por ser fora do nicho Casa Inteligente.
+# Adicionado em 20/07/2026 após "Par GBIC SFP 10G 10km LC BIDI" ser sugerido
+# e publicado 6x — produto de datacenter passou pelo filtro de busca ML.
+KEYWORDS_EXCLUIR_NICHO = {
+    'gbic', 'sfp', 'transceptor', 'fibra óptica', 'fibra optica',
+    'rack', 'switch gerenciável', 'switch gerenciavel',
+    'cabo ethernet', 'cabo de rede', 'notebook', 'laptop',
+    'monitor', 'teclado', 'mouse', 'celular', 'smartphone',
+    'tablet', 'impressora', 'projetor', 'servidor', 'nobreak',
+    'modem', 'drone',
+}
+
+# Cotas de sugestão por categoria (total = 7)
+COTAS_CATEGORIA = {
+    'eletro':     2,  # Eletrodomésticos Inteligentes
+    'automacao':  2,  # Automação Residencial (tomadas, interruptores, hubs)
+    'iluminacao': 1,  # Iluminação Inteligente
+    'seguranca':  1,  # Segurança (câmeras, fechaduras, sensores)
+    'livre':      1,  # Slot livre — maior score entre todos os restantes
+}
+TOTAL_SUGESTAO = sum(COTAS_CATEGORIA.values())  # 7
+
+# IDs de categorias no blog WP — usados para cruzar déficit
+WP_CATEGORIA_IDS_BLOG = {
+    'seguranca':  25,
+    'iluminacao': 26,
+    'eletro':     28,
+    'automacao':  24,
+}
+
+CATEGORIA_EMOJI = {
+    'automacao':  '🏠',
+    'seguranca':  '📷',
+    'iluminacao': '💡',
+    'eletro':     '⚡',
+}
+CATEGORIA_LABEL = {
+    'automacao':  'Automação',
+    'seguranca':  'Segurança',
+    'iluminacao': 'Iluminação',
+    'eletro':     'Eletro',
+}
+
 
 def parse_preco_brl(texto: str) -> float:
     """Converte 'R$ 1.234,56' (já sem o prefixo) para float 1234.56."""
@@ -107,6 +153,76 @@ def parse_preco_brl(texto: str) -> float:
         return float(texto.replace('.', '').replace(',', '.'))
     except ValueError:
         return 0.0
+
+
+def is_nicho_casa_inteligente(titulo: str) -> bool:
+    """Rejeita produto que contenha palavra-chave claramente off-nicho."""
+    t = titulo.lower()
+    return not any(kw in t for kw in KEYWORDS_EXCLUIR_NICHO)
+
+
+def detectar_categoria_sugestao(titulo: str) -> str:
+    """Classifica produto em uma das categorias de sugestão semanal."""
+    t = titulo.lower()
+    if any(kw in t for kw in ['câmera', 'camera', 'sensor', 'fechadura', 'alarme',
+                               'vigilância', 'vigilancia']):
+        return 'seguranca'
+    if any(kw in t for kw in ['lâmpada', 'lampada', 'led', 'dimmer',
+                               'iluminação', 'iluminacao', 'fita led', 'strip led']):
+        return 'iluminacao'
+    if any(kw in t for kw in ['robô', 'robo', 'aspirador', 'airfryer', 'air fryer',
+                               'smart band', 'smartband', 'geladeira', 'echo', 'alexa',
+                               'fire tv', 'roku', 'tv stick', 'comedouro']):
+        return 'eletro'
+    return 'automacao'
+
+
+def buscar_mlbs_publicados_no_wp() -> set:
+    """
+    Retorna MLB IDs já presentes em posts do WordPress (qualquer status).
+    Extrai via data-asin no content.rendered — não depende de set hardcoded.
+    """
+    mlbs = set()
+    for pagina in range(1, 10):  # máx 900 posts
+        try:
+            r = requests.get(
+                f'{WP_URL}/wp-json/wp/v2/posts',
+                headers=WP_HEADERS,
+                params={'per_page': 100, 'page': pagina, 'status': 'any',
+                        '_fields': 'content'},
+                timeout=20,
+            )
+        except Exception:
+            break
+        if not r.ok:
+            break
+        posts = r.json() if isinstance(r.json(), list) else []
+        if not posts:
+            break
+        for post in posts:
+            content = post.get('content', {}).get('rendered', '') or ''
+            mlbs.update(MLB_RE_CONTENT.findall(content))
+        if len(posts) < 100:
+            break
+    return mlbs
+
+
+def buscar_contagem_wp_por_categoria() -> dict:
+    """Conta posts (any status) por categoria no WordPress para calcular déficit."""
+    contagem = {k: 0 for k in WP_CATEGORIA_IDS_BLOG}
+    for cat_key, cat_id in WP_CATEGORIA_IDS_BLOG.items():
+        try:
+            r = requests.get(
+                f'{WP_URL}/wp-json/wp/v2/posts',
+                headers=WP_HEADERS,
+                params={'categories': cat_id, 'per_page': 1, 'status': 'any'},
+                timeout=15,
+            )
+            if r.ok:
+                contagem[cat_key] = int(r.headers.get('X-WP-Total', 0))
+        except Exception:
+            pass
+    return contagem
 
 
 def parse_items_html(html_blob: str) -> list:
@@ -179,12 +295,14 @@ def score(item: dict) -> float:
 
 
 def elegivel(item: dict) -> bool:
-    """Filtra produto: não publicado e dentro da faixa de preço."""
+    """Filtra produto: não publicado, dentro da faixa de preço e no nicho Casa Inteligente."""
     iid = item.get('id', '')
     preco = item.get('price') or 0
+    titulo = item.get('title', '')
     return (
         iid not in MLB_PUBLICADOS
         and PRECO_MIN <= preco <= PRECO_MAX
+        and is_nicho_casa_inteligente(titulo)
     )
 
 
@@ -194,9 +312,20 @@ def formatar_preco(v: float) -> str:
 
 
 def montar_mensagem(top7: list, data_semana: str) -> str:
+    # Distribuição por categoria para o cabeçalho
+    dist: dict = {}
+    for item in top7:
+        cat = item.get('_categoria', 'automacao')
+        dist[cat] = dist.get(cat, 0) + 1
+    dist_linha = ' | '.join(
+        f'{CATEGORIA_EMOJI.get(k, "🏠")} {CATEGORIA_LABEL.get(k, k)} ×{v}'
+        for k, v in dist.items()
+    )
+
     linhas = [
         '<b>🏠 Sugestão Semanal — Casa Inteligente</b>',
         f'<b>📅 Semana de {data_semana}</b>',
+        f'<i>📊 {dist_linha}</i>',
         '',
         'Responda <b>"aprovado"</b> para usar todos,',
         'ou informe os MLB IDs que quer excluir.',
@@ -212,9 +341,11 @@ def montar_mensagem(top7: list, data_semana: str) -> str:
         avaliacao = ''
         if item.get('review_count', 0) > 0:
             avaliacao = f' · ⭐ {item["rating"]:.1f} ({item["review_count"]} avaliações)'
+        cat = item.get('_categoria', 'automacao')
+        cat_emoji = CATEGORIA_EMOJI.get(cat, '🏠')
 
         linhas.append(
-            f'<b>{i}. {nome}</b>\n'
+            f'<b>{i}. {cat_emoji} {nome}</b>\n'
             f'💰 {preco}{avaliacao}\n'
             f'🔗 <a href="{link}">{iid}</a>\n'
             f'<code>{iid}</code>'
@@ -241,6 +372,16 @@ def enviar_telegram(texto: str):
 
 def main():
     print(f'[INFO] {datetime.now().isoformat()} — sugestão semanal iniciada')
+
+    # Expande MLB_PUBLICADOS com posts reais do WordPress — garante dedup sem
+    # depender de atualização manual do set hardcoded acima.
+    try:
+        mlbs_wp = buscar_mlbs_publicados_no_wp()
+        MLB_PUBLICADOS.update(mlbs_wp)
+        print(f'[INFO] {len(mlbs_wp)} MLBs encontrados no WP '
+              f'(total exclusão: {len(MLB_PUBLICADOS)})')
+    except Exception as e:
+        print(f'[WARN] Falha ao buscar MLBs do WP: {e} — usando apenas lista estática')
 
     vistos: set = set()
     candidatos: list = []
@@ -272,14 +413,75 @@ def main():
         )
         return
 
+    # Score base ordenado (usado como fallback para slots "livre")
     candidatos.sort(key=lambda x: x['_score'], reverse=True)
-    top7 = candidatos[:7]
+
+    # === Seleção por cota de categoria ===
+    # Busca contagem atual para ponderar score por déficit de categoria
+    try:
+        contagem_wp = buscar_contagem_wp_por_categoria()
+        max_artigos = max(contagem_wp.values(), default=0)
+        # Categorias com menos artigos publicados ganham bônus de 5% por artigo faltante
+        deficit_peso = {k: 1.0 + max(0, max_artigos - v) * 0.05
+                        for k, v in contagem_wp.items()}
+        print(f'[INFO] Posts WP por categoria: {contagem_wp}')
+    except Exception as e:
+        print(f'[WARN] Falha ao buscar contagem WP: {e}')
+        deficit_peso = {}
+
+    # Classifica candidatos por categoria e aplica peso de déficit
+    buckets: dict = {k: [] for k in COTAS_CATEGORIA}
+    for item in candidatos:
+        cat = detectar_categoria_sugestao(item.get('title', ''))
+        item['_categoria'] = cat
+        peso = deficit_peso.get(cat, 1.0)
+        item['_score_final'] = item['_score'] * peso
+        bucket_key = cat if cat in buckets else 'automacao'
+        buckets[bucket_key].append(item)
+
+    for k in buckets:
+        buckets[k].sort(key=lambda x: x.get('_score_final', 0), reverse=True)
+
+    # Preenche slots por cota
+    selecionados: list = []
+    ids_selecionados: set = set()
+
+    for cat, cota in COTAS_CATEGORIA.items():
+        if cat == 'livre':
+            continue
+        adicionados = 0
+        for item in buckets.get(cat, []):
+            if adicionados >= cota:
+                break
+            if item['id'] not in ids_selecionados:
+                selecionados.append(item)
+                ids_selecionados.add(item['id'])
+                adicionados += 1
+
+    # Slot livre: melhor score_final restante entre todos os candidatos
+    restantes = sorted(
+        [c for c in candidatos if c['id'] not in ids_selecionados],
+        key=lambda x: x.get('_score_final', 0), reverse=True,
+    )
+    for item in restantes[:COTAS_CATEGORIA['livre']]:
+        selecionados.append(item)
+        ids_selecionados.add(item['id'])
+
+    # Completa slots se algum bucket ficou sem candidatos suficientes
+    if len(selecionados) < TOTAL_SUGESTAO:
+        for item in restantes[COTAS_CATEGORIA['livre']:]:
+            if len(selecionados) >= TOTAL_SUGESTAO:
+                break
+            if item['id'] not in ids_selecionados:
+                selecionados.append(item)
+                ids_selecionados.add(item['id'])
+
+    top7 = selecionados[:TOTAL_SUGESTAO]
 
     data_semana = datetime.now().strftime('%d/%m/%Y')
     mensagem = montar_mensagem(top7, data_semana)
     enviar_telegram(mensagem)
 
-    # Detalhes (MLB, título, score) ficam só no Telegram — não em log público do Actions
     print(f'[OK] Top {len(top7)} enviados via Telegram')
 
     # Salva estado para o detector de aprovação — planilha Google Sheets, não
