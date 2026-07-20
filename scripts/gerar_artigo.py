@@ -56,6 +56,8 @@ WP_HEADERS = {
     'Content-Type':  'application/json',
 }
 
+MLB_RE_CONTENT = re.compile(r'data-asin="(MLB\d+)"')
+
 # Mapeamento título → categoria. IMPORTANTE: blog (taxonomia "category") e
 # WooCommerce (taxonomia "product_cat") são taxonomias DIFERENTES com IDs
 # próprios — reaproveitar os IDs de uma para a outra resulta em termo
@@ -200,6 +202,48 @@ def slugify(texto: str) -> str:
     return texto[:90]
 
 
+def capitalizar_titulo(titulo: str) -> str:
+    """
+    Aplica Title Case editorial em pt-BR ao título cru do Mercado Livre.
+    - Tokens com dígito (ex: 3MP, IM7) são preservados exatamente.
+    - Conectivos (de, do, da, e, em...) ficam em minúsculo.
+    - Detecta títulos em CAIXA ALTA e aplica capitalize palavra a palavra.
+    """
+    conectivos = {'de', 'do', 'da', 'dos', 'das', 'e', 'em', 'a', 'o', 'os',
+                  'as', 'para', 'por', 'com', 'no', 'na', 'nos', 'nas', 'ao',
+                  'à', 'um', 'uma', 'ou', 'que', 'se'}
+
+    palavras = titulo.strip().split()
+    if not palavras:
+        return titulo
+
+    # Detecta se o título está em CAIXA ALTA (>50% das palavras alfa são all-caps)
+    alfa = [p for p in palavras if any(c.isalpha() for c in p)]
+    is_all_caps = bool(alfa) and (
+        sum(1 for p in alfa if p == p.upper()) / len(alfa)
+    ) > 0.5
+
+    resultado = []
+    for i, palavra in enumerate(palavras):
+        # Tokens com dígito: preservar exatamente como vieram
+        if any(c.isdigit() for c in palavra):
+            resultado.append(palavra)
+            continue
+
+        p_lower = palavra.lower()
+
+        if i == 0:
+            resultado.append(p_lower.capitalize())
+        elif p_lower in conectivos:
+            resultado.append(p_lower)
+        elif is_all_caps:
+            resultado.append(p_lower.capitalize())
+        else:
+            resultado.append(palavra)  # preserva capitalização original
+
+    return ' '.join(resultado)[:100]
+
+
 def detectar_categoria_key(titulo: str) -> str:
     titulo_lower = titulo.lower()
     for cat, keywords in CATEGORIA_KEYWORDS.items():
@@ -236,6 +280,52 @@ def link_afiliado_ml(mlb_id: str) -> str:
     )
 
 
+# === Deduplicação — consulta ao WordPress ===
+
+def buscar_mlbs_publicados_no_wp() -> set:
+    """
+    Retorna MLB IDs já presentes em posts do WordPress (qualquer status).
+    Extrai via data-asin no content.rendered — não depende de estado na planilha.
+    """
+    mlbs = set()
+    for pagina in range(1, 10):  # máx 900 posts
+        try:
+            r = requests.get(
+                f'{WP_URL}/wp-json/wp/v2/posts',
+                headers=WP_HEADERS,
+                params={'per_page': 100, 'page': pagina, 'status': 'any',
+                        '_fields': 'content'},
+                timeout=20,
+            )
+        except Exception:
+            break
+        if not r.ok:
+            break
+        posts = r.json() if isinstance(r.json(), list) else []
+        if not posts:
+            break
+        for post in posts:
+            content = post.get('content', {}).get('rendered', '') or ''
+            mlbs.update(MLB_RE_CONTENT.findall(content))
+        if len(posts) < 100:
+            break
+    return mlbs
+
+
+def slug_ja_existe_no_wp(slug: str) -> bool:
+    """Retorna True se o slug já existe no WordPress (qualquer status)."""
+    try:
+        r = requests.get(
+            f'{WP_URL}/wp-json/wp/v2/posts',
+            headers=WP_HEADERS,
+            params={'slug': slug, 'per_page': 1, 'status': 'any'},
+            timeout=15,
+        )
+        return r.ok and bool(r.json())
+    except Exception:
+        return False
+
+
 # === Dados do produto ===
 # A API pública do Mercado Livre (api.mercadolibre.com) bloqueia com 403 qualquer
 # chamada feita a partir de IPs de datacenter/cloud — incluindo os runners do
@@ -247,9 +337,10 @@ def link_afiliado_ml(mlb_id: str) -> str:
 # "aprovacao_atual" (campo itens_aprovados). Esta função só remodela esse dict.
 
 def montar_produto(item: dict) -> dict:
+    titulo_original = item.get('title', item['id'])
     return {
         'id':           item['id'],
-        'title':        item.get('title', item['id']),
+        'title':        capitalizar_titulo(titulo_original),
         'price':        item.get('price') or 0,
         'rating':       item.get('rating') or 0,
         'review_count': item.get('review_count') or 0,
@@ -555,9 +646,16 @@ def main():
         salvar_estado('aprovacao_atual', aprovacao)
         sys.exit(0)
 
-    # Quantidade e datas de agendamento ficam no log — produtos/MLBs não (evitar
-    # expor no Actions público, agora que o repo é público, a fila antes da publicação)
     print(f'[INFO] {len(mlbs_pendentes)} produtos para processar')
+
+    # Dedup por ID do produto: busca MLBs já publicados no WordPress antes de
+    # qualquer chamada ao Gemini — evita gastar quota gerando artigos duplicados.
+    try:
+        mlbs_ja_no_wp = buscar_mlbs_publicados_no_wp()
+        print(f'[INFO] {len(mlbs_ja_no_wp)} MLBs já existentes no WP (dedup)')
+    except Exception as e:
+        print(f'[WARN] Falha ao buscar MLBs do WP: {e} — dedup por ID desativado')
+        mlbs_ja_no_wp = set()
 
     datas_pub     = construir_datas_publicacao(len(mlbs_pendentes))
     data_brt_ini  = datas_pub[0].astimezone(BRT).strftime('%d/%m')
@@ -565,17 +663,34 @@ def main():
     print(f'[INFO] Agendamento: {data_brt_ini} a {data_brt_fim} (09h BRT/12h UTC cada — '
           f'datas no passado publicam imediatamente, correção automática do WP core)')
 
-    # Inicializa da sessão anterior (tolerante a reexecuções parciais)
     posts_criados = aprovacao.get('posts_criados', [])
+    data_idx = 0  # índice nas datas disponíveis (avança apenas em publicações bem-sucedidas)
 
     for idx, mlb_id in enumerate(mlbs_pendentes, 1):
         print(f'\n[INFO] ── produto {idx}/{len(mlbs_pendentes)} ──')
+
+        # Dedup por ID do produto ML
+        if mlb_id in mlbs_ja_no_wp:
+            print(f'[SKIP] MLB já publicado no WordPress — marcando como processado')
+            mlbs_processados.add(mlb_id)
+            aprovacao['mlbs_processados'] = list(mlbs_processados)
+            salvar_estado('aprovacao_atual', aprovacao)
+            continue
 
         item = itens_por_mlb.get(mlb_id)
         if not item:
             print(f'[WARN] dados do produto {idx} não encontrados em itens_aprovados — pulando')
             continue
         produto = montar_produto(item)
+
+        # Dedup por slug: verifica se o slug já existe antes de chamar o Gemini
+        slug_base = slugify(produto['title']) + '-vale-a-pena'
+        if slug_ja_existe_no_wp(slug_base):
+            print(f'[SKIP] Slug "{slug_base}" já existe no WP — abortando, sem sufixo numérico')
+            mlbs_processados.add(mlb_id)
+            aprovacao['mlbs_processados'] = list(mlbs_processados)
+            salvar_estado('aprovacao_atual', aprovacao)
+            continue
 
         # Gera artigo com Gemini
         artigo_md = gerar_artigo_gemini(produto)
@@ -588,12 +703,14 @@ def main():
 
         intro_desc  = extrair_intro(artigo_md)
         conteudo_wp = montar_conteudo_wp(artigo_md, mlb_id)
-        data_pub    = datas_pub[idx - 1]
+        data_pub    = datas_pub[data_idx]
+        data_idx   += 1
 
         # Publica artigo no WordPress
         post_id = publicar_wp(produto, conteudo_wp, data_pub)
         if not post_id:
             print(f'[ERRO] WP falhou para o produto {idx} — pulando')
+            data_idx -= 1  # devolve a data para o próximo produto
             continue
 
         # Cria produto na loja WooCommerce (descrição = introdução do artigo)
@@ -605,7 +722,7 @@ def main():
             'wc_id':       wc_id,
             'titulo':      produto['title'],
             'imagem_url':  produto['imagem_url'],
-            'slug':        slugify(produto['title']) + '-vale-a-pena',
+            'slug':        slug_base,
             'capa_gerada': False,
             'data_pub':    data_pub.isoformat(),
         })
